@@ -208,15 +208,29 @@ DodSystemDisplayWrite(
     _In_  UINT  PositionY);
 
 #if DBG
+class kd_debug_printer 
+{
+public:
+    kd_debug_printer(ULONG level);
+    void print(const char * fmt, ...);
+private:
+    ULONG _level;
+    BOOLEAN _off;
+    static ULONG _xlate[6];
+ };
 
 extern int nDebugLevel;
 void DebugPrintFuncSerial(const char *format, ...);
 
 void DebugPrintFunc(const char *format, ...);
 
-#define DbgPrint(level, line) \
-    if (level > nDebugLevel) {} \
-    else DebugPrintFuncSerial line
+#define DbgPrint(level, line)           \
+    if (level > nDebugLevel) {}         \
+    else {                              \
+       DebugPrintFuncSerial line;       \
+     }                                  \
+     kd_debug_printer(level).print line
+
 #else
 #define DbgPrint(level, line) 
 #endif

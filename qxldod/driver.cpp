@@ -667,7 +667,29 @@ void DebugPrintFunc(const char *format, ...)
     va_start(list, format);
     vDbgPrintEx(DPFLTR_DEFAULT_ID, 9 | DPFLTR_MASK, format, list);
 }
+ULONG kd_debug_printer::_xlate [] = { 0, 0, 1, 2, 3 };
+
+kd_debug_printer::kd_debug_printer(ULONG level) : _off(FALSE)
+{
+    if (!level || level > 5) {
+        _off = TRUE;
+        _level = 0xffffffff;
+
+    }
+    else {
+        _level = _xlate[level - 1];
+    }
+}
+
+void kd_debug_printer::print(const char * fmt, ...)
+{
+    va_list list;
+    va_start(list, fmt);
+    if (_off) {
+        return;
+    }
+    vDbgPrintEx(DPFLTR_IHVVIDEO_ID, _level, fmt, list);
+}
 #endif
 
 #pragma code_seg(pop) // End Non-Paged Code
-
