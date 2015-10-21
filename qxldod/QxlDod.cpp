@@ -44,6 +44,7 @@ BYTE PixelMask[BITS_PER_BYTE]  = {0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01
 
 #pragma code_seg(pop)
 
+#pragma code_seg("PAGE")
 
 
 QxlDod::QxlDod(_In_ DEVICE_OBJECT* pPhysicalDeviceObject) : m_pPhysicalDevice(pPhysicalDeviceObject),
@@ -1947,6 +1948,20 @@ NTSTATUS QxlDod::ReadConfiguration()
 //
 #pragma code_seg(push)
 #pragma code_seg()
+
+UINT BPPFromPixelFormat(D3DDDIFORMAT Format)
+{
+    switch (Format) {
+    case D3DDDIFMT_UNKNOWN: return 0;
+    case D3DDDIFMT_P8: return 8;
+    case D3DDDIFMT_R5G6B5: return 16;
+    case D3DDDIFMT_R8G8B8: return 24;
+    case D3DDDIFMT_X8R8G8B8: // fall through
+    case D3DDDIFMT_A8R8G8B8: return 32;
+    default: QXL_LOG_ASSERTION1("Unknown D3DDDIFORMAT 0x%I64x", Format); return 0;
+    }
+}
+
 D3DDDI_VIDEO_PRESENT_SOURCE_ID QxlDod::FindSourceForTarget(D3DDDI_VIDEO_PRESENT_TARGET_ID TargetId, BOOLEAN DefaultToZero)
 {
     UNREFERENCED_PARAMETER(TargetId);
@@ -1961,7 +1976,6 @@ D3DDDI_VIDEO_PRESENT_SOURCE_ID QxlDod::FindSourceForTarget(D3DDDI_VIDEO_PRESENT_
     return DefaultToZero ? 0 : D3DDDI_ID_UNINITIALIZED;
 }
 
-#pragma code_seg(pop) // End Non-Paged Code
 
 //
 // Frame buffer map/unmap
@@ -2309,6 +2323,7 @@ VOID BltBits (
         DbgPrint(TRACE_LEVEL_ERROR, ("Either dst (0x%I64x) or src (0x%I64x) bits encountered exception during access.\n", pDst->pBits, pSrc->pBits));
     }
 }
+#pragma code_seg(pop) // End Non-Paged Code
 
 VgaDevice::VgaDevice(_In_ QxlDod* pQxlDod)
 {
@@ -2892,6 +2907,9 @@ VOID VgaDevice::BlackOutScreen(CURRENT_BDD_MODE* pCurrentBddMod)
     pCurrentBddMod->ZeroedOutStart.QuadPart = NewPhysAddrStart.QuadPart;
     pCurrentBddMod->ZeroedOutEnd.QuadPart = NewPhysAddrEnd.QuadPart;
 }
+#pragma code_seg(push)
+#pragma code_seg()
+// BEGIN: Non-Paged Code Segment
 
 BOOLEAN VgaDevice::InterruptRoutine(_In_ PDXGKRNL_INTERFACE pDxgkInterface, _In_  ULONG MessageNumber)
 {
@@ -2907,6 +2925,7 @@ VOID VgaDevice::DpcRoutine(PVOID)
 VOID VgaDevice::ResetDevice(VOID)
 {
 }
+#pragma  code_seg(pop) //end non-paged code
 
 NTSTATUS  VgaDevice::SetPointerShape(_In_ CONST DXGKARG_SETPOINTERSHAPE* pSetPointerShape)
 {
@@ -3558,14 +3577,6 @@ void QxlDevice::InitMspace(UINT32 mspace_type, UINT8 *start, size_t capacity)
     m_MSInfo[mspace_type].mspace_start = start;
     m_MSInfo[mspace_type].mspace_end = start + capacity;
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s _mspace = %p\n", __FUNCTION__, m_MSInfo[mspace_type]._mspace));
-}
-
-void QxlDevice::ResetDevice(void)
-{
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
-    m_RamHdr->int_mask = ~0;
-    WRITE_PORT_UCHAR(m_IoBase + QXL_IO_MEMSLOT_ADD, 0);
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
 }
 
 NTSTATUS
@@ -4513,6 +4524,9 @@ VOID QxlDevice::PushCursor(VOID)
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s notify = %d\n", __FUNCTION__, notify));
 }
 
+#pragma code_seg(push)
+#pragma code_seg()
+// BEGIN: Non-Paged Code Segment
 BOOLEAN QxlDevice::InterruptRoutine(_In_ PDXGKRNL_INTERFACE pDxgkInterface, _In_  ULONG MessageNumber)
 {
     UNREFERENCED_PARAMETER(MessageNumber);
@@ -4572,6 +4586,15 @@ VOID QxlDevice::DpcRoutine(PVOID ptr)
     DbgPrint(TRACE_LEVEL_INFORMATION, ("<--- %s\n", __FUNCTION__));
 }
 
+void QxlDevice::ResetDevice(void)
+{
+    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
+    m_RamHdr->int_mask = ~0;
+    WRITE_PORT_UCHAR(m_IoBase + QXL_IO_MEMSLOT_ADD, 0);
+    DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
+}
+#pragma code_seg(pop) //end non-paged code
+
 VOID QxlDevice::UpdateArea(CONST RECT* area, UINT32 surface_id)
 {
     DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
@@ -4596,20 +4619,6 @@ VOID QxlDevice::DpcCallback(PDPC_CB_CONTEXT ctx)
     ctx->data = m_Pending;
     m_Pending = 0;
 
-}
-
-UINT BPPFromPixelFormat(D3DDDIFORMAT Format)
-{
-    switch (Format)
-    {
-        case D3DDDIFMT_UNKNOWN: return 0;
-        case D3DDDIFMT_P8: return 8;
-        case D3DDDIFMT_R5G6B5: return 16;
-        case D3DDDIFMT_R8G8B8: return 24;
-        case D3DDDIFMT_X8R8G8B8: // fall through
-        case D3DDDIFMT_A8R8G8B8: return 32;
-        default: QXL_LOG_ASSERTION1("Unknown D3DDDIFORMAT 0x%I64x", Format); return 0;
-    }
 }
 
 // Given bits per pixel, return the pixel format at the same bpp
