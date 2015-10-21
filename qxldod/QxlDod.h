@@ -212,20 +212,34 @@ typedef struct _CURRENT_BDD_MODE
 
 class QxlDod;
 
-class HwDeviceIntrface {
+//
+// Can't use virtual for functions that  are non-pageable because there is no guarantee
+// that the vtable will not be paged out.  Will test for type in the parent call and
+// cast to call in the  correct device class.
+//
+
+typedef enum {
+    QXL_DEVICE,
+    VGA_DEVICE,
+    INVALID_DEVICE,
+}WIN_QXL_DEVICE_TYPE;
+
+class HwDeviceInterface {
 public:
-    virtual ~HwDeviceIntrface() {;}
+    HwDeviceInterface(_In_ QxlDod* pQxlDod) {m_type = INVALID_DEVICE;}
+    virtual ~HwDeviceInterface() {;}
     virtual NTSTATUS QueryCurrentMode(PVIDEO_MODE RequestedMode) = 0;
     virtual NTSTATUS SetCurrentMode(ULONG Mode) = 0;
     virtual NTSTATUS GetCurrentMode(ULONG* Mode) = 0;
     virtual NTSTATUS SetPowerState(DEVICE_POWER_STATE DevicePowerState, DXGK_DISPLAY_INFORMATION* pDispInfo) = 0;
     virtual NTSTATUS HWInit(PCM_RESOURCE_LIST pResList, DXGK_DISPLAY_INFORMATION* pDispInfo) = 0;
     virtual NTSTATUS HWClose(void) = 0;
-    virtual BOOLEAN InterruptRoutine(_In_ PDXGKRNL_INTERFACE pDxgkInterface, _In_  ULONG MessageNumber) = 0;
-    virtual VOID DpcRoutine(PVOID) = 0;
-    virtual VOID ResetDevice(void) = 0;
-
     virtual ULONG GetModeCount(void) = 0;
+
+    BOOLEAN InterruptRoutine(_In_ PDXGKRNL_INTERFACE pDxgkInterface, _In_  ULONG MessageNumber);;
+    VOID DpcRoutine(_In_ PDXGKRNL_INTERFACE pDxgkInterface);
+    VOID ResetDevice(void);;
+
     PVIDEO_MODE_INFORMATION GetModeInfo(UINT idx) {return &m_ModeInfo[idx];}
     USHORT GetModeNumber(USHORT idx) {return m_ModeNumbers[idx];}
     USHORT GetCurrentModeIndex(void) {return m_CurrentMode;}
@@ -258,10 +272,11 @@ protected:
     USHORT m_CurrentMode;
     USHORT m_CustomMode;
     ULONG  m_Id;
+    WIN_QXL_DEVICE_TYPE m_type;
 };
 
 class VgaDevice  :
-    public HwDeviceIntrface
+    public HwDeviceInterface
 {
 public:
     VgaDevice(_In_ QxlDod* pQxlDod);
@@ -286,9 +301,9 @@ public:
                                  _In_ D3DKMDT_VIDPN_PRESENT_PATH_ROTATION Rotation,
                                  _In_ const CURRENT_BDD_MODE* pModeCur);
     VOID BlackOutScreen(CURRENT_BDD_MODE* pCurrentBddMod);
-    BOOLEAN InterruptRoutine(_In_ PDXGKRNL_INTERFACE pDxgkInterface, _In_  ULONG MessageNumber);
-    VOID DpcRoutine(PVOID);
-    VOID ResetDevice(VOID);
+    BOOLEAN HWInterruptRoutine(_In_ PDXGKRNL_INTERFACE pDxgkInterface, _In_  ULONG MessageNumber);
+    VOID HWDpcRoutine(PDXGKRNL_INTERFACE pDxgkInterface);
+    VOID HWResetDevice(VOID);
     NTSTATUS SetPointerShape(_In_ CONST DXGKARG_SETPOINTERSHAPE* pSetPointerShape);
     NTSTATUS SetPointerPosition(_In_ CONST DXGKARG_SETPOINTERPOSITION* pSetPointerPosition);
     NTSTATUS Escape(_In_ CONST DXGKARG_ESCAPE* pEscap);
@@ -434,7 +449,7 @@ typedef struct DpcCbContext {
 #define ALIGN(a, b) (((a) + ((b) - 1)) & ~((b) - 1))
 
 class QxlDevice  :
-    public HwDeviceIntrface
+    public HwDeviceInterface
 {
 public:
     QxlDevice(_In_ QxlDod* pQxlDod);
@@ -459,9 +474,9 @@ public:
                     _In_ D3DKMDT_VIDPN_PRESENT_PATH_ROTATION Rotation,
                     _In_ const CURRENT_BDD_MODE* pModeCur);
     VOID BlackOutScreen(CURRENT_BDD_MODE* pCurrentBddMod);
-    BOOLEAN InterruptRoutine(_In_ PDXGKRNL_INTERFACE pDxgkInterface, _In_  ULONG MessageNumber);
-    VOID DpcRoutine(PVOID);
-    VOID ResetDevice(VOID);
+    BOOLEAN HWInterruptRoutine(_In_ PDXGKRNL_INTERFACE pDxgkInterface, _In_  ULONG MessageNumber);
+    VOID HWDpcRoutine(PDXGKRNL_INTERFACE pDxgkInterface);
+    VOID HWResetDevice(VOID);
     NTSTATUS SetPointerShape(_In_ CONST DXGKARG_SETPOINTERSHAPE* pSetPointerShape);
     NTSTATUS SetPointerPosition(_In_ CONST DXGKARG_SETPOINTERPOSITION* pSetPointerPosition);
     NTSTATUS Escape(_In_ CONST DXGKARG_ESCAPE* pEscap);
@@ -591,9 +606,9 @@ private:
 
     D3DDDI_VIDEO_PRESENT_SOURCE_ID m_SystemDisplaySourceId;
     DXGKARG_SETPOINTERSHAPE m_PointerShape;
-    HwDeviceIntrface* m_pHWDevice;
-    DWORD m_VgaCompatible;
-    DWORD m_PointerCaps;
+    HwDeviceInterface* m_pHWDevice;
+	DWORD m_VgaCompatible;
+	DWORD m_PointerCaps;
 public:
     QxlDod(_In_ DEVICE_OBJECT* pPhysicalDeviceObject);
     ~QxlDod(void);
@@ -686,7 +701,7 @@ public:
                                  _In_                                     UINT  SourceStride,
                                  _In_                                     INT   PositionX,
                                  _In_                                     INT   PositionY);
-    PDXGKRNL_INTERFACE GetDxgkInterrface(void) { return &m_DxgkInterface;}
+    PDXGKRNL_INTERFACE GetDxgkInterface(void) { return &m_DxgkInterface;}
 private:
     VOID CleanUp(VOID);
     NTSTATUS CheckHardware();

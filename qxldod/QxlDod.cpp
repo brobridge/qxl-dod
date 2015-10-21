@@ -2325,7 +2325,7 @@ VOID BltBits (
 }
 #pragma code_seg(pop) // End Non-Paged Code
 
-VgaDevice::VgaDevice(_In_ QxlDod* pQxlDod)
+VgaDevice::VgaDevice(_In_ QxlDod* pQxlDod) : HwDeviceInterface(pQxlDod)
 {
     m_pQxlDod = pQxlDod;
     m_ModeInfo = NULL;
@@ -2333,6 +2333,7 @@ VgaDevice::VgaDevice(_In_ QxlDod* pQxlDod)
     m_ModeNumbers = NULL;
     m_CurrentMode = 0;
     m_Id = 0;
+    m_type = VGA_DEVICE;
 }
 
 VgaDevice::~VgaDevice(void)
@@ -2911,18 +2912,18 @@ VOID VgaDevice::BlackOutScreen(CURRENT_BDD_MODE* pCurrentBddMod)
 #pragma code_seg()
 // BEGIN: Non-Paged Code Segment
 
-BOOLEAN VgaDevice::InterruptRoutine(_In_ PDXGKRNL_INTERFACE pDxgkInterface, _In_  ULONG MessageNumber)
+BOOLEAN VgaDevice::HWInterruptRoutine(_In_ PDXGKRNL_INTERFACE pDxgkInterface, _In_  ULONG MessageNumber)
 {
     UNREFERENCED_PARAMETER(pDxgkInterface);
     UNREFERENCED_PARAMETER(MessageNumber);
     return FALSE;
 }
 
-VOID VgaDevice::DpcRoutine(PVOID)
+VOID VgaDevice::HWDpcRoutine(PDXGKRNL_INTERFACE pDxgkInterface)
 {
 }
 
-VOID VgaDevice::ResetDevice(VOID)
+VOID VgaDevice::HWResetDevice(VOID)
 {
 }
 #pragma  code_seg(pop) //end non-paged code
@@ -2946,7 +2947,7 @@ NTSTATUS VgaDevice::Escape(_In_ CONST DXGKARG_ESCAPE* pEscap)
     return STATUS_NOT_IMPLEMENTED;
 }
 
-QxlDevice::QxlDevice(_In_ QxlDod* pQxlDod)
+QxlDevice::QxlDevice(_In_ QxlDod* pQxlDod) : HwDeviceInterface(pQxlDod)
 {
     m_pQxlDod = pQxlDod;
     m_ModeInfo = NULL;
@@ -2956,6 +2957,7 @@ QxlDevice::QxlDevice(_In_ QxlDod* pQxlDod)
     m_CustomMode = 0;
     m_FreeOutputs = 0;
     m_Pending = 0;
+    m_type = QXL_DEVICE;
 }
 
 QxlDevice::~QxlDevice(void)
@@ -3182,7 +3184,7 @@ NTSTATUS QxlDevice::SetPowerState(_In_ DEVICE_POWER_STATE DevicePowerState, DXGK
 NTSTATUS QxlDevice::HWInit(PCM_RESOURCE_LIST pResList, DXGK_DISPLAY_INFORMATION* pDispInfo)
 {
     DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
-    PDXGKRNL_INTERFACE pDxgkInterface = m_pQxlDod->GetDxgkInterrface();
+    PDXGKRNL_INTERFACE pDxgkInterface = m_pQxlDod->GetDxgkInterface();
     UINT pci_range = QXL_RAM_RANGE_INDEX;
     for (ULONG i = 0; i < pResList->Count; ++i)
     {
@@ -3359,7 +3361,7 @@ void QxlDevice::QxlClose()
 
 void QxlDevice::UnmapMemory(void)
 {
-    PDXGKRNL_INTERFACE pDxgkInterface = m_pQxlDod->GetDxgkInterrface();
+    PDXGKRNL_INTERFACE pDxgkInterface = m_pQxlDod->GetDxgkInterface();
     if (m_IoMapped && m_IoBase)
     {
         pDxgkInterface->DxgkCbUnmapMemory( pDxgkInterface->DeviceHandle, &m_IoBase);
@@ -4527,7 +4529,8 @@ VOID QxlDevice::PushCursor(VOID)
 #pragma code_seg(push)
 #pragma code_seg()
 // BEGIN: Non-Paged Code Segment
-BOOLEAN QxlDevice::InterruptRoutine(_In_ PDXGKRNL_INTERFACE pDxgkInterface, _In_  ULONG MessageNumber)
+
+BOOLEAN QxlDevice::HWInterruptRoutine(_In_ PDXGKRNL_INTERFACE pDxgkInterface, _In_  ULONG MessageNumber)
 {
     UNREFERENCED_PARAMETER(MessageNumber);
     DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
@@ -4552,10 +4555,8 @@ BOOLEAN QxlDevice::InterruptRoutine(_In_ PDXGKRNL_INTERFACE pDxgkInterface, _In_
     return TRUE;
 }
 
-VOID QxlDevice::DpcRoutine(PVOID ptr)
+VOID QxlDevice::HWDpcRoutine(PDXGKRNL_INTERFACE pDxgkInterface)
 {
-    PDXGKRNL_INTERFACE pDxgkInterface = (PDXGKRNL_INTERFACE)ptr;
-
     DbgPrint(TRACE_LEVEL_INFORMATION, ("---> %s\n", __FUNCTION__));
     DPC_CB_CONTEXT ctx;
     BOOLEAN dummy;
@@ -4586,13 +4587,89 @@ VOID QxlDevice::DpcRoutine(PVOID ptr)
     DbgPrint(TRACE_LEVEL_INFORMATION, ("<--- %s\n", __FUNCTION__));
 }
 
-void QxlDevice::ResetDevice(void)
+void QxlDevice::HWResetDevice(void)
 {
     DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
     m_RamHdr->int_mask = ~0;
     WRITE_PORT_UCHAR(m_IoBase + QXL_IO_MEMSLOT_ADD, 0);
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
 }
+
+// Given bits per pixel, return the pixel format at the same bpp
+D3DDDIFORMAT PixelFormatFromBPP(UINT BPP)
+{
+    switch (BPP)
+    {
+        case  8: return D3DDDIFMT_P8;
+        case 16: return D3DDDIFMT_R5G6B5;
+        case 24: return D3DDDIFMT_R8G8B8;
+        case 32: return D3DDDIFMT_X8R8G8B8;
+        default: QXL_LOG_ASSERTION1("A bit per pixel of 0x%I64x is not supported.", BPP); return D3DDDIFMT_UNKNOWN;
+    }
+}
+
+
+BOOLEAN HwDeviceInterface::InterruptRoutine(_In_ PDXGKRNL_INTERFACE pDxgkInterface, _In_ ULONG MessageNumber)
+{
+    QxlDevice * qxl_device;
+    VgaDevice * vga_device;
+
+    switch (m_type) {
+    case QXL_DEVICE:
+        qxl_device = (QxlDevice *)this;
+        return qxl_device->HWInterruptRoutine(pDxgkInterface, MessageNumber);
+    case VGA_DEVICE:
+        vga_device = (VgaDevice *)this;
+        return vga_device->HWInterruptRoutine(pDxgkInterface, MessageNumber);
+    default:
+        DbgPrint(TRACE_LEVEL_ERROR, ("%s called with invalid device type of %d\n",
+            __FUNCTION__, m_type));
+        return FALSE;
+    }
+}
+
+VOID HwDeviceInterface::DpcRoutine(PDXGKRNL_INTERFACE pDxgkInterface)
+{
+    QxlDevice * qxl_device;
+    VgaDevice * vga_device;
+
+    switch (m_type) {
+    case QXL_DEVICE:
+        qxl_device = (QxlDevice *)this;
+        qxl_device->HWDpcRoutine(pDxgkInterface);
+        return;
+    case VGA_DEVICE:
+        vga_device = (VgaDevice *)this;
+        vga_device->HWDpcRoutine(pDxgkInterface);
+        return;
+    default:
+        DbgPrint(TRACE_LEVEL_ERROR, ("%s called with invalid device type of %d\n",
+            __FUNCTION__, m_type));
+        return;
+    }
+}
+
+VOID HwDeviceInterface::ResetDevice(void)
+{
+    QxlDevice * qxl_device;
+    VgaDevice * vga_device;
+
+    switch (m_type) {
+    case QXL_DEVICE:
+        qxl_device = (QxlDevice *)this;
+        qxl_device->HWResetDevice();
+        return;
+    case VGA_DEVICE:
+        vga_device = (VgaDevice *)this;
+        vga_device->HWResetDevice();
+        return;
+    default:
+        DbgPrint(TRACE_LEVEL_ERROR, ("%s called with invalid device type of %d\n",
+            __FUNCTION__, m_type));
+        return;
+    }
+}
+
 #pragma code_seg(pop) //end non-paged code
 
 VOID QxlDevice::UpdateArea(CONST RECT* area, UINT32 surface_id)
@@ -4619,19 +4696,6 @@ VOID QxlDevice::DpcCallback(PDPC_CB_CONTEXT ctx)
     ctx->data = m_Pending;
     m_Pending = 0;
 
-}
-
-// Given bits per pixel, return the pixel format at the same bpp
-D3DDDIFORMAT PixelFormatFromBPP(UINT BPP)
-{
-    switch (BPP)
-    {
-        case  8: return D3DDDIFMT_P8;
-        case 16: return D3DDDIFMT_R5G6B5;
-        case 24: return D3DDDIFMT_R8G8B8;
-        case 32: return D3DDDIFMT_X8R8G8B8;
-        default: QXL_LOG_ASSERTION1("A bit per pixel of 0x%I64x is not supported.", BPP); return D3DDDIFMT_UNKNOWN;
-    }
 }
 
 UINT SpiceFromPixelFormat(D3DDDIFORMAT Format)
