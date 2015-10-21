@@ -113,72 +113,73 @@ NTSTATUS QxlDod::StartDevice(_In_  DXGK_START_INFO*   pDxgkStartInfo,
 {
     PHYSICAL_ADDRESS PhysicAddress;
     PAGED_CODE();
+    NTSTATUS Status;
     QXL_ASSERT(pDxgkStartInfo != NULL);
     QXL_ASSERT(pDxgkInterface != NULL);
     QXL_ASSERT(pNumberOfViews != NULL);
     QXL_ASSERT(pNumberOfChildren != NULL);
-//CHECK ME!!!!!!!!!!!!!
+    //CHECK ME!!!!!!!!!!!!!
     RtlCopyMemory(&m_DxgkInterface, pDxgkInterface, sizeof(m_DxgkInterface));
     RtlZeroMemory(m_CurrentModes, sizeof(m_CurrentModes));
-//CHECK ME!!!!!!!!!!!!!
+    //CHECK ME!!!!!!!!!!!!!
     m_CurrentModes[0].DispInfo.TargetId = D3DDDI_ID_UNINITIALIZED;
-    // Get device information from OS.
-    NTSTATUS Status = m_DxgkInterface.DxgkCbGetDeviceInformation(m_DxgkInterface.DeviceHandle, &m_DeviceInfo);
-    if (!NT_SUCCESS(Status))
-    {
-        QXL_LOG_ASSERTION1("DxgkCbGetDeviceInformation failed with status 0x%X\n",
-                           Status);
+    m_Flags.DriverStarted = TRUE;
+    do {
+
+        // Get device information from OS.
+        Status = m_DxgkInterface.DxgkCbGetDeviceInformation(m_DxgkInterface.DeviceHandle, &m_DeviceInfo);
+        if (!NT_SUCCESS(Status)) {
+            QXL_LOG_ASSERTION1("DxgkCbGetDeviceInformation failed with status 0x%X\n",
+                Status);
+            break;
+        }
+
+        Status = CheckHardware();
+        if (NT_SUCCESS(Status)) {
+            m_pHWDevice = new(NonPagedPoolNx) QxlDevice(this);
+        }
+        else {
+            m_pHWDevice = new(NonPagedPoolNx) VgaDevice(this);
+        }
+
+        if (!m_pHWDevice) {
+            Status = STATUS_NO_MEMORY;
+            DbgPrint(TRACE_LEVEL_ERROR, ("HWInit failed to allocate memory\n"));
+            break;
+        }
+
+        Status = m_pHWDevice->HWInit(m_DeviceInfo.TranslatedResourceList, &m_CurrentModes[0].DispInfo);
+        if (!NT_SUCCESS(Status)) {
+            DbgPrint(TRACE_LEVEL_ERROR, ("HWInit failed with status 0x%X\n", Status));
+            break;
+        }
+
+        Status = RegisterHWInfo(m_pHWDevice->GetId());
+        if (!NT_SUCCESS(Status)) {
+            QXL_LOG_ASSERTION1("RegisterHWInfo failed with status 0x%X\n",
+                Status);
+            break;
+        }
+
+        PhysicAddress.QuadPart = m_CurrentModes[0].DispInfo.PhysicAddress.QuadPart;
+        if (m_pHWDevice->GetId() == 0) {
+            Status = m_DxgkInterface.DxgkCbAcquirePostDisplayOwnership(m_DxgkInterface.DeviceHandle, &(m_CurrentModes[0].DispInfo));
+        }
+
+        if (!NT_SUCCESS(Status)) {
+            DbgPrint(TRACE_LEVEL_ERROR, ("DxgkCbAcquirePostDisplayOwnership failed with status 0x%X Width = %d\n",
+                Status, m_CurrentModes[0].DispInfo.Width));
+            Status = STATUS_UNSUCCESSFUL;
+            break;
+        }
+    } while (0);
+    if (!NT_SUCCESS(Status)) {
+        m_Flags.DriverStarted = FALSE;
         return Status;
     }
 
-    Status = CheckHardware();
-    if (NT_SUCCESS(Status))
-    {
-        m_pHWDevice = new(NonPagedPoolNx) QxlDevice(this);
-    }
-    else
-    {
-        m_pHWDevice = new(NonPagedPoolNx) VgaDevice(this);
-    }
-
-    if (!m_pHWDevice)
-    {
-        Status = STATUS_NO_MEMORY;
-        DbgPrint(TRACE_LEVEL_ERROR, ("HWInit failed to allocate memory\n"));
-        return Status;
-    }
-
-    Status = m_pHWDevice->HWInit(m_DeviceInfo.TranslatedResourceList, &m_CurrentModes[0].DispInfo);
-    if (!NT_SUCCESS(Status))
-    {
-        DbgPrint(TRACE_LEVEL_ERROR, ("HWInit failed with status 0x%X\n", Status));
-        return Status;
-    }
-
-    Status = RegisterHWInfo(m_pHWDevice->GetId());
-    if (!NT_SUCCESS(Status))
-    {
-        QXL_LOG_ASSERTION1("RegisterHWInfo failed with status 0x%X\n",
-                           Status);
-        return Status;
-    }
-
-    PhysicAddress.QuadPart = m_CurrentModes[0].DispInfo.PhysicAddress.QuadPart;
-    if (m_pHWDevice->GetId() == 0)
-    {
-         Status = m_DxgkInterface.DxgkCbAcquirePostDisplayOwnership(m_DxgkInterface.DeviceHandle, &(m_CurrentModes[0].DispInfo));
-    }
-
-    if (!NT_SUCCESS(Status) )
-    {
-        DbgPrint(TRACE_LEVEL_ERROR, ("DxgkCbAcquirePostDisplayOwnership failed with status 0x%X Width = %d\n",
-                           Status, m_CurrentModes[0].DispInfo.Width));
-        return STATUS_UNSUCCESSFUL;
-    }
-
-    if (m_CurrentModes[0].DispInfo.Width == 0)
-    {
-        m_CurrentModes[0].DispInfo.Width = MIN_WIDTH_SIZE; 
+    if (m_CurrentModes[0].DispInfo.Width == 0) {
+        m_CurrentModes[0].DispInfo.Width = MIN_WIDTH_SIZE;
         m_CurrentModes[0].DispInfo.Height = MIN_HEIGHT_SIZE;
 		m_CurrentModes[0].DispInfo.Pitch = MIN_WIDTH_SIZE * BPPFromPixelFormat(D3DDDIFMT_R8G8B8) / 8;
         m_CurrentModes[0].DispInfo.ColorFormat = D3DDDIFMT_R8G8B8;
@@ -186,12 +187,9 @@ NTSTATUS QxlDod::StartDevice(_In_  DXGK_START_INFO*   pDxgkStartInfo,
         if (PhysicAddress.QuadPart != 0L) {
              m_CurrentModes[0].DispInfo.PhysicAddress.QuadPart = PhysicAddress.QuadPart;
         }
-
     }
-
-   *pNumberOfViews = MAX_VIEWS;
-   *pNumberOfChildren = MAX_CHILDREN;
-    m_Flags.DriverStarted = TRUE;
+    *pNumberOfViews = MAX_VIEWS;
+    *pNumberOfChildren = MAX_CHILDREN;
     DbgPrint(TRACE_LEVEL_INFORMATION, ("<--- %s\n", __FUNCTION__));
     return STATUS_SUCCESS;
 }
