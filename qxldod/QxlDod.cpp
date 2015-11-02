@@ -4,6 +4,11 @@
 
 #pragma code_seg(push)
 #pragma code_seg()
+
+#define WIN_QXL_INT_MASK ((QXL_INTERRUPT_DISPLAY) | \
+                          (QXL_INTERRUPT_CURSOR) | \
+                          (QXL_INTERRUPT_IO_CMD)) 
+
 // BEGIN: Non-Paged Code
 
 // Bit is 1 from Idx to end of byte, with bit count starting at high order
@@ -3350,7 +3355,7 @@ NTSTATUS QxlDevice::QxlInit(DXGK_DISPLAY_INFORMATION* pDispInfo)
 
     WRITE_PORT_UCHAR((PUCHAR)(m_IoBase + QXL_IO_RESET), 0);
     CreateRings();
-    m_RamHdr->int_mask = ~0;
+    m_RamHdr->int_mask = WIN_QXL_INT_MASK;
     CreateMemSlots();
     InitDeviceMemoryResources();
     return Status;
@@ -4543,17 +4548,12 @@ BOOLEAN QxlDevice::HWInterruptRoutine(_In_ PDXGKRNL_INTERFACE pDxgkInterface, _I
     WRITE_PORT_UCHAR((PUCHAR)(m_IoBase + QXL_IO_UPDATE_IRQ), 0);
     m_Pending |= m_RamHdr->int_pending;
     m_RamHdr->int_pending = 0;
-
-    DXGKARGCB_NOTIFY_INTERRUPT_DATA  notifyInt;
-    notifyInt.InterruptType = DXGK_INTERRUPT_DISPLAYONLY_PRESENT_PROGRESS;
-    notifyInt.DisplayOnlyPresentProgress.VidPnSourceId = 0;
-
-    pDxgkInterface->DxgkCbNotifyInterrupt(pDxgkInterface->DeviceHandle,&notifyInt);
     if (!pDxgkInterface->DxgkCbQueueDpc(pDxgkInterface->DeviceHandle)) {
-        m_RamHdr->int_mask = ~0;
-        WRITE_PORT_UCHAR((PUCHAR)(m_IoBase + QXL_IO_UPDATE_IRQ), 0);
+        m_RamHdr->int_mask = WIN_QXL_INT_MASK;
+        WRITE_PORT_UCHAR((PUCHAR) (m_IoBase + QXL_IO_UPDATE_IRQ), 0);
         DbgPrint(TRACE_LEVEL_FATAL, ("---> %s DxgkCbQueueDpc failed\n", __FUNCTION__));
     }
+    DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
     return TRUE;
 }
 
@@ -4583,7 +4583,7 @@ VOID QxlDevice::HWDpcRoutine(PDXGKRNL_INTERFACE pDxgkInterface)
         DbgPrint(TRACE_LEVEL_INFORMATION, ("---> %s m_IoCmdEvent\n", __FUNCTION__));
         KeSetEvent (&m_IoCmdEvent, IO_NO_INCREMENT, FALSE);
     }
-    m_RamHdr->int_mask = ~0;
+    m_RamHdr->int_mask = WIN_QXL_INT_MASK;
     WRITE_PORT_UCHAR((PUCHAR)(m_IoBase + QXL_IO_UPDATE_IRQ), 0);
 
     DbgPrint(TRACE_LEVEL_INFORMATION, ("<--- %s\n", __FUNCTION__));
@@ -4592,7 +4592,7 @@ VOID QxlDevice::HWDpcRoutine(PDXGKRNL_INTERFACE pDxgkInterface)
 void QxlDevice::HWResetDevice(void)
 {
     DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
-    m_RamHdr->int_mask = ~0;
+    m_RamHdr->int_mask = WIN_QXL_INT_MASK;
     WRITE_PORT_UCHAR(m_IoBase + QXL_IO_MEMSLOT_ADD, 0);
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
 }
