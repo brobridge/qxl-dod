@@ -218,7 +218,9 @@ VOID QxlDod::CleanUp(VOID)
     {
         if (m_CurrentModes[Source].FrameBuffer.Ptr)
         {
+#ifdef USE_FRAMEBUFFER
             UnmapFrameBuffer(m_CurrentModes[Source].FrameBuffer.Ptr, m_CurrentModes[Source].DispInfo.Height * m_CurrentModes[Source].DispInfo.Pitch);
+#endif
             m_CurrentModes[Source].FrameBuffer.Ptr = NULL;
             m_CurrentModes[Source].Flags.FrameBufferIsActive = FALSE;
         }
@@ -1387,8 +1389,10 @@ NTSTATUS QxlDod::CommitVidPn(_In_ CONST DXGKARG_COMMITVIDPN* CONST pCommitVidPn)
     if (m_CurrentModes[pCommitVidPn->AffectedVidPnSourceId].FrameBuffer.Ptr &&
         !m_CurrentModes[pCommitVidPn->AffectedVidPnSourceId].Flags.DoNotMapOrUnmap)
     {
+#ifdef USE_FRAMEBUFFER
         Status = UnmapFrameBuffer(m_CurrentModes[pCommitVidPn->AffectedVidPnSourceId].FrameBuffer.Ptr,
                                   m_CurrentModes[pCommitVidPn->AffectedVidPnSourceId].DispInfo.Pitch * m_CurrentModes[pCommitVidPn->AffectedVidPnSourceId].DispInfo.Height);
+#endif
         m_CurrentModes[pCommitVidPn->AffectedVidPnSourceId].FrameBuffer.Ptr = NULL;
         m_CurrentModes[pCommitVidPn->AffectedVidPnSourceId].Flags.FrameBufferIsActive = FALSE;
 
@@ -1515,7 +1519,7 @@ NTSTATUS QxlDod::SetSourceModeAndPath(CONST D3DKMDT_VIDPN_SOURCE_MODE* pSourceMo
     pCurrentBddMode->DispInfo.Height = pSourceMode->Format.Graphics.PrimSurfSize.cy;
     pCurrentBddMode->DispInfo.Pitch = pSourceMode->Format.Graphics.PrimSurfSize.cx * BPPFromPixelFormat(pCurrentBddMode->DispInfo.ColorFormat) / BITS_PER_BYTE;
 
-
+#ifdef USE_FRAMEBUFFER
     if (!pCurrentBddMode->Flags.DoNotMapOrUnmap)
     {
         // Map the new frame buffer
@@ -1524,7 +1528,7 @@ NTSTATUS QxlDod::SetSourceModeAndPath(CONST D3DKMDT_VIDPN_SOURCE_MODE* pSourceMo
                                 pCurrentBddMode->DispInfo.Pitch * pCurrentBddMode->DispInfo.Height,
                                 &(pCurrentBddMode->FrameBuffer.Ptr));
     }
-
+#endif
     if (NT_SUCCESS(Status))
     {
 
