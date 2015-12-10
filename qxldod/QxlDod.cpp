@@ -4477,11 +4477,10 @@ NTSTATUS QxlDevice::SetCustomDisplay(QXLEscapeSetCustomDisplay* custom_display)
     UINT xres = custom_display->xres;
     UINT yres = custom_display->yres;
     UINT bpp = QXL_BPP;
-    DbgPrint(TRACE_LEVEL_ERROR, ("%s - %d (%dx%d#%d)\n", __FUNCTION__, m_Id, xres, yres, bpp));
+    DbgPrint(TRACE_LEVEL_WARNING, ("%s - %d (%dx%d#%d)\n", __FUNCTION__, m_Id, xres, yres, bpp));
     if (xres < MIN_WIDTH_SIZE || yres < MIN_HEIGHT_SIZE) {
-        DbgPrint(TRACE_LEVEL_VERBOSE, ("%s: (%dx%d#%d) must be at least (%dxd)\n", __FUNCTION__,
+        DbgPrint(TRACE_LEVEL_VERBOSE, ("%s: (%dx%d#%d) less than (%dxd)\n", __FUNCTION__,
             xres, yres, bpp, MIN_WIDTH_SIZE, MIN_HEIGHT_SIZE));
-        return ERROR_INVALID_DATA;
     }
     m_CustomMode =(USHORT) ((m_CustomMode == m_ModeCount-1)?  m_ModeCount - 2 : m_ModeCount - 1);
 
