@@ -468,19 +468,6 @@ NTSTATUS QxlDod::Escape(_In_ CONST DXGKARG_ESCAPE* pEscape)
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s Flags = %d\n", __FUNCTION__, pEscape->Flags));
 
     Status = m_pHWDevice->Escape(pEscape);
-    if (Status == STATUS_SUCCESS)
-    {
-        DXGK_CHILD_STATUS ChildStatus;
-        ChildStatus.Type = StatusConnection;
-        ChildStatus.ChildUid = 0;
-        ChildStatus.HotPlug.Connected = FALSE;
-        Status = m_DxgkInterface.DxgkCbIndicateChildStatus(m_DxgkInterface.DeviceHandle, &ChildStatus);
-        if (Status == STATUS_SUCCESS)
-        {
-            ChildStatus.HotPlug.Connected = TRUE;
-            Status = m_DxgkInterface.DxgkCbIndicateChildStatus(m_DxgkInterface.DeviceHandle, &ChildStatus);
-        }
-    }
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s Status = %x\n", __FUNCTION__, Status));
     return Status;
 }
