@@ -4370,7 +4370,7 @@ NTSTATUS  QxlDevice::SetPointerShape(_In_ CONST DXGKARG_SETPOINTERSHAPE* pSetPoi
     cursor->header.hot_spot_x = (UINT16)pSetPointerShape->XHot;
     cursor->header.hot_spot_y = (UINT16)pSetPointerShape->YHot;
 
-    cursor->data_size = line_size * pSetPointerShape->Height;
+    cursor->data_size = line_size * pSetPointerShape->Height * (pSetPointerShape->Flags.Monochrome ? 2 : 1);
     DbgPrint(TRACE_LEVEL_INFORMATION, ("<--> %s %d::%d::%d::%d::%d\n", __FUNCTION__, cursor->header.width, cursor->header.height, cursor->header.hot_spot_x, cursor->header.hot_spot_y, cursor->data_size));
 
     chunk = &cursor->chunk;
