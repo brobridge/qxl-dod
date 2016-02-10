@@ -180,7 +180,7 @@ NTSTATUS QxlDod::StartDevice(_In_  DXGK_START_INFO*   pDxgkStartInfo,
     {
         m_CurrentModes[0].DispInfo.Width = MIN_WIDTH_SIZE; 
         m_CurrentModes[0].DispInfo.Height = MIN_HEIGHT_SIZE;
-        m_CurrentModes[0].DispInfo.Pitch = BPPFromPixelFormat(D3DDDIFMT_R8G8B8) / 8;
+		m_CurrentModes[0].DispInfo.Pitch = MIN_WIDTH_SIZE * BPPFromPixelFormat(D3DDDIFMT_R8G8B8) / 8;
         m_CurrentModes[0].DispInfo.ColorFormat = D3DDDIFMT_R8G8B8;
         m_CurrentModes[0].DispInfo.TargetId = 0;
         if (PhysicAddress.QuadPart != 0L) {
