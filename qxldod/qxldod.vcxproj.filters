@@ -42,7 +42,7 @@
     <ClCompile Include="QxlDod.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="mspace.c">
+    <ClCompile Include="mspace.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

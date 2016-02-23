@@ -1828,6 +1828,7 @@ static void* prepend_alloc(mstate m, char* newbase, char* oldbase,
       qsize += nsize;
     }
     set_free_with_pinuse(q, qsize, oldfirst);
+#pragma warning(suppress: 28182) /* code analysis noise*/
     insert_chunk(m, q, qsize);
     check_free_chunk(m, q);
   }
@@ -1909,6 +1910,7 @@ static void* tmalloc_large(mstate m, size_t nb) {
         else {
           set_size_and_pinuse_of_inuse_chunk(m, v, nb);
           set_size_and_pinuse_of_free_chunk(r, rsize);
+#pragma warning(suppress: 28182) /* code analysis noise*/
           insert_chunk(m, r, rsize);
         }
         return chunk2mem(v);
