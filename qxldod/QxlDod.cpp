@@ -47,6 +47,14 @@ BYTE PixelMask[BITS_PER_BYTE]  = {0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01
                                        ((ULONG)LOWER_5_BITS((Pixel)) << SHIFT_LOWER_5_IN_565_BACK))
 
 
+typedef struct _QXL_ESCAPE {
+    int ioctl;
+    union {
+        QXLEscapeSetCustomDisplay custom_display;
+        QXLHead monitor_config;
+    };
+}QXL_ESCAPE;
+
 #pragma code_seg(pop)
 
 #pragma code_seg("PAGE")
@@ -469,6 +477,7 @@ NTSTATUS QxlDod::Escape(_In_ CONST DXGKARG_ESCAPE* pEscape)
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s Flags = %d\n", __FUNCTION__, pEscape->Flags));
 
     Status = m_pHWDevice->Escape(pEscape);
+    
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s Status = %x\n", __FUNCTION__, Status));
     return Status;
 }
@@ -595,7 +604,7 @@ NTSTATUS QxlDod::QueryVidPnHWCapability(_Inout_ DXGKARG_QUERYVIDPNHWCAPABILITY* 
 NTSTATUS QxlDod::IsSupportedVidPn(_Inout_ DXGKARG_ISSUPPORTEDVIDPN* pIsSupportedVidPn)
 {
     PAGED_CODE();
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
+    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s %d\n", __FUNCTION__, m_pHWDevice->Id()));
 
     QXL_ASSERT(pIsSupportedVidPn != NULL);
 
@@ -916,7 +925,7 @@ NTSTATUS QxlDod::EnumVidPnCofuncModality(_In_ CONST DXGKARG_ENUMVIDPNCOFUNCMODAL
     PAGED_CODE();
 
     QXL_ASSERT(pEnumCofuncModality != NULL);
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
+    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s device %d\n", __FUNCTION__, m_pHWDevice->Id()));
 
     D3DKMDT_HVIDPNTOPOLOGY                   hVidPnTopology = 0;
     D3DKMDT_HVIDPNSOURCEMODESET              hVidPnSourceModeSet = 0;
@@ -1272,7 +1281,7 @@ NTSTATUS QxlDod::EnumVidPnCofuncModality(_In_ CONST DXGKARG_ENUMVIDPNCOFUNCMODAL
 NTSTATUS QxlDod::SetVidPnSourceVisibility(_In_ CONST DXGKARG_SETVIDPNSOURCEVISIBILITY* pSetVidPnSourceVisibility)
 {
     PAGED_CODE();
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
+    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s %d\n", __FUNCTION__, m_pHWDevice->Id()));
     QXL_ASSERT(pSetVidPnSourceVisibility != NULL);
     QXL_ASSERT((pSetVidPnSourceVisibility->VidPnSourceId < MAX_VIEWS) ||
                (pSetVidPnSourceVisibility->VidPnSourceId == D3DDDI_ID_ALL));
@@ -3099,17 +3108,20 @@ NTSTATUS QxlDevice::QueryCurrentMode(PVIDEO_MODE RequestedMode)
 
 NTSTATUS QxlDevice::SetCurrentMode(ULONG Mode)
 {
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s Mode = %x\n", __FUNCTION__, Mode));
+    DbgPrint(TRACE_LEVEL_INFORMATION, ("---> %s - %d: Mode = %d\n", __FUNCTION__, m_Id, Mode));
     for (ULONG idx = 0; idx < GetModeCount(); idx++)
     {
         if (Mode == m_ModeNumbers[idx])
         {
             DestroyPrimarySurface();
             CreatePrimarySurface(&m_ModeInfo[idx]);
+            DbgPrint(TRACE_LEVEL_INFORMATION, ("%s device %d: setting current mode %d (%d x %d)\n",
+                __FUNCTION__, m_Id, Mode, m_ModeInfo[idx].VisScreenWidth,
+                m_ModeInfo[idx].VisScreenHeight));
             return STATUS_SUCCESS;
         }
     }
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
+    DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s failed\n", __FUNCTION__));
     return STATUS_UNSUCCESSFUL;
 }
 
@@ -3307,6 +3319,7 @@ NTSTATUS QxlDevice::QxlInit(DXGK_DISPLAY_INFORMATION* pDispInfo)
     m_RamHdr->int_mask = WIN_QXL_INT_MASK;
     CreateMemSlots();
     InitDeviceMemoryResources();
+    InitMonitorConfig();
     return Status;
 }
 
@@ -3372,7 +3385,8 @@ void QxlDevice::DestroyMemSlots(void)
 void QxlDevice::CreatePrimarySurface(PVIDEO_MODE_INFORMATION pModeInfo)
 {
     QXLSurfaceCreate *primary_surface_create;
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
+    DbgPrint(TRACE_LEVEL_INFORMATION, ("---> %s - %d: (%d x %d)\n", __FUNCTION__, m_Id, 
+        pModeInfo->VisScreenWidth, pModeInfo->VisScreenHeight));
     primary_surface_create = &m_RamHdr->create_surface;
     primary_surface_create->format = pModeInfo->BitsPerPlane;
     primary_surface_create->width = pModeInfo->VisScreenWidth;
@@ -3527,6 +3541,17 @@ void QxlDevice::InitDeviceMemoryResources(void)
     InitMspace(MSPACE_TYPE_VRAM, m_VRamStart, m_VRamSize);
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
 }
+
+void QxlDevice::InitMonitorConfig(void)
+{
+    size_t config_size = sizeof(QXLMonitorsConfig) + sizeof(QXLHead);
+    m_monitor_config = (QXLMonitorsConfig*) AllocMem(MSPACE_TYPE_DEVRAM, config_size, TRUE);
+    RtlZeroMemory(m_monitor_config, config_size);
+
+    m_monitor_config_pa = &m_RamHdr->monitors_config;
+    *m_monitor_config_pa = PA(m_monitor_config, m_MainMemSlot);
+}
+
 
 void QxlDevice::InitMspace(UINT32 mspace_type, UINT8 *start, size_t capacity)
 {
@@ -4121,7 +4146,7 @@ VOID QxlDevice::BltBits (
     LONG width;
     LONG height;
 
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
+    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s device %d\n", __FUNCTION__,m_Id));
     UNREFERENCED_PARAMETER(NumRects);
     UNREFERENCED_PARAMETER(pDst);
 
@@ -4381,45 +4406,102 @@ NTSTATUS QxlDevice::SetPointerPosition(_In_ CONST DXGKARG_SETPOINTERPOSITION* pS
     return STATUS_SUCCESS;
 }
 
-NTSTATUS QxlDevice::Escape(_In_ CONST DXGKARG_ESCAPE* pEscap)
+NTSTATUS QxlDevice::UpdateChildStatus(BOOLEAN connect)
 {
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
-    QXLEscapeSetCustomDisplay *custom_display;
-    UINT xres;
-    UINT yres;
-    UINT bpp;
+    NTSTATUS           Status(STATUS_SUCCESS);
+    DXGK_CHILD_STATUS  ChildStatus;
+    PDXGKRNL_INTERFACE pDXGKInterface(m_pQxlDod->GetDxgkInterface());
 
-    if (pEscap->PrivateDriverDataSize != sizeof(QXLEscapeSetCustomDisplay)) {
-        DbgPrint(TRACE_LEVEL_ERROR, ("<--> %s Incorrect buffer size %d instead of %d\n", __FUNCTION__, pEscap->PrivateDriverDataSize, sizeof(QXLEscapeSetCustomDisplay)));
-        return STATUS_INVALID_BUFFER_SIZE;
-    }
-    custom_display = (QXLEscapeSetCustomDisplay*)pEscap->pPrivateDriverData;
-    xres = custom_display->xres & ~0x3;
-    yres = custom_display->yres & ~0x3;
-    bpp = custom_display->bpp;
-    if (bpp != QXL_BPP)
-    {
-        bpp = QXL_BPP;
-    }
-    if (xres < MIN_WIDTH_SIZE || yres < MIN_HEIGHT_SIZE)
-    {
-        DbgPrint(TRACE_LEVEL_ERROR, ("%s: xres = %d, yres = %d\n", __FUNCTION__, xres, yres));
+    ChildStatus.Type = StatusConnection;
+    ChildStatus.ChildUid = 0;
+    ChildStatus.HotPlug.Connected = connect;
+    Status = pDXGKInterface->DxgkCbIndicateChildStatus(pDXGKInterface->DeviceHandle, &ChildStatus);
+    return Status;
+}
+
+NTSTATUS QxlDevice::SetCustomDisplay(QXLEscapeSetCustomDisplay* custom_display)
+{
+    NTSTATUS status;
+    UINT xres = custom_display->xres;
+    UINT yres = custom_display->yres;
+    UINT bpp = QXL_BPP;
+    DbgPrint(TRACE_LEVEL_ERROR, ("%s - %d (%dx%d#%d)\n", __FUNCTION__, m_Id, xres, yres, bpp));
+    if (xres < MIN_WIDTH_SIZE || yres < MIN_HEIGHT_SIZE) {
+        DbgPrint(TRACE_LEVEL_VERBOSE, ("%s: (%dx%d#%d) must be at least (%dxd)\n", __FUNCTION__,
+            xres, yres, bpp, MIN_WIDTH_SIZE, MIN_HEIGHT_SIZE));
         return ERROR_INVALID_DATA;
     }
-
-    if (m_CustomMode == (m_ModeCount - 1))
-        m_CustomMode = (USHORT)(m_ModeCount - 2);
-    else
-        m_CustomMode = (USHORT)(m_ModeCount - 1);
+    m_CustomMode =(USHORT) ((m_CustomMode == m_ModeCount-1)?  m_ModeCount - 2 : m_ModeCount - 1);
 
     if ((xres * yres * bpp / 8) > m_RomHdr->surface0_area_size) {
         DbgPrint(TRACE_LEVEL_ERROR, ("%s: Mode (%dx%d#%d) doesn't fit in memory (%d)\n",
                     __FUNCTION__, xres, yres, bpp, m_RomHdr->surface0_area_size));
-        return STATUS_INVALID_PARAMETER;
+        return ERROR_NOT_ENOUGH_MEMORY;
     }
     UpdateVideoModeInfo(m_CustomMode, xres, yres, bpp);
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
-    return STATUS_SUCCESS;
+    status = UpdateChildStatus(TRUE);
+    return status;
+}
+
+void QxlDevice::SetMonitorConfig(QXLHead * monitor_config)
+{
+    m_monitor_config->count = 1;
+    m_monitor_config->max_allowed = 1;
+
+    memcpy(&m_monitor_config->heads[0], monitor_config, sizeof(QXLHead));
+    m_monitor_config->heads[0].id = 0;
+    m_monitor_config->heads[0].surface_id = 0;
+
+    DbgPrint(TRACE_LEVEL_VERBOSE, ("%s:%d configuring monitor at (%d, %d)  (%dx%d)\n", __FUNCTION__, m_Id,
+        m_monitor_config->heads[0].x, m_monitor_config->heads[0].y,
+        m_monitor_config->heads[0].width, m_monitor_config->heads[0].height));
+    AsyncIo(QXL_IO_MONITORS_CONFIG_ASYNC, 0);
+}
+
+NTSTATUS QxlDevice::Escape(_In_ CONST DXGKARG_ESCAPE* pEscape)
+{
+    //size_t          data_size(sizeof(int));
+    //QXL_ESCAPE*     pQXLEscape((QXL_ESCAPE*) pEscape->pPrivateDriverData);
+    //NTSTATUS        status(STATUS_SUCCESS);
+
+    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
+
+    //switch (pQXLEscape->ioctl) {
+    //case QXL_ESCAPE_SET_CUSTOM_DISPLAY: {
+    //    data_size += sizeof(QXLEscapeSetCustomDisplay);
+    //    if (pEscape->PrivateDriverDataSize != data_size) {
+    //        status = STATUS_INVALID_BUFFER_SIZE;
+    //        break;
+    //    }
+    //    status = SetCustomDisplay(&pQXLEscape->custom_display);
+    //    break;
+    //}
+    //case QXL_ESCAPE_MONITOR_CONFIG: {
+    //    data_size += sizeof(QXLHead);
+    //    if (pEscape->PrivateDriverDataSize != data_size) {
+    //        status = STATUS_INVALID_BUFFER_SIZE;
+    //        break;
+    //    }
+    //    SetMonitorConfig(&pQXLEscape->monitor_config);
+    //    status = STATUS_SUCCESS;
+    //    break;
+    //}
+    //default:
+    //    DbgPrint(TRACE_LEVEL_ERROR, ("%s: invalid Escape 0x%x\n", __FUNCTION__, pQXLEscape->ioctl));
+    //    status = STATUS_INVALID_PARAMETER;
+    //}
+
+    //if (status == STATUS_INVALID_BUFFER_SIZE) {
+    //    DbgPrint(TRACE_LEVEL_ERROR, ("%s invalid buffer size of %d, should be %d\n", __FUNCTION__,
+    //        pEscape->PrivateDriverDataSize, data_size));
+    //}
+
+    //return status;
+
+	if (pEscape->PrivateDriverDataSize != sizeof(QXLEscapeSetCustomDisplay)) {
+		return STATUS_INVALID_BUFFER_SIZE;
+	}
+	return SetCustomDisplay((QXLEscapeSetCustomDisplay *) pEscape->pPrivateDriverData);
 }
 
 VOID QxlDevice::WaitForCmdRing()
