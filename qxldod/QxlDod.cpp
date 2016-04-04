@@ -48,12 +48,12 @@ BYTE PixelMask[BITS_PER_BYTE]  = {0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01
 
 
 typedef struct _QXL_ESCAPE {
-    int ioctl;
+    uint32_t ioctl;
     union {
         QXLEscapeSetCustomDisplay custom_display;
         QXLHead monitor_config;
     };
-}QXL_ESCAPE;
+} QXL_ESCAPE;
 
 QxlDod::QxlDod(_In_ DEVICE_OBJECT* pPhysicalDeviceObject) : m_pPhysicalDevice(pPhysicalDeviceObject),
                                                             m_MonitorPowerState(PowerDeviceD0),
@@ -4513,49 +4513,51 @@ void QxlDevice::SetMonitorConfig(QXLHead * monitor_config)
 
 NTSTATUS QxlDevice::Escape(_In_ CONST DXGKARG_ESCAPE* pEscape)
 {
-	PAGED_CODE();
-	//size_t          data_size(sizeof(int));
-    //QXL_ESCAPE*     pQXLEscape((QXL_ESCAPE*) pEscape->pPrivateDriverData);
-    //NTSTATUS        status(STATUS_SUCCESS);
+    PAGED_CODE();
+    size_t                     data_size(sizeof(uint32_t));
+    QXL_ESCAPE*                pQXLEscape((QXL_ESCAPE*)pEscape->pPrivateDriverData);
+    NTSTATUS                   status(STATUS_SUCCESS);
+    QXLEscapeSetCustomDisplay* pCustomDisplay = &pQXLEscape->custom_display;
+    uint32_t                   ioctl = pQXLEscape->ioctl;
 
     DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
 
-    //switch (pQXLEscape->ioctl) {
-    //case QXL_ESCAPE_SET_CUSTOM_DISPLAY: {
-    //    data_size += sizeof(QXLEscapeSetCustomDisplay);
-    //    if (pEscape->PrivateDriverDataSize != data_size) {
-    //        status = STATUS_INVALID_BUFFER_SIZE;
-    //        break;
-    //    }
-    //    status = SetCustomDisplay(&pQXLEscape->custom_display);
-    //    break;
-    //}
-    //case QXL_ESCAPE_MONITOR_CONFIG: {
-    //    data_size += sizeof(QXLHead);
-    //    if (pEscape->PrivateDriverDataSize != data_size) {
-    //        status = STATUS_INVALID_BUFFER_SIZE;
-    //        break;
-    //    }
-    //    SetMonitorConfig(&pQXLEscape->monitor_config);
-    //    status = STATUS_SUCCESS;
-    //    break;
-    //}
-    //default:
-    //    DbgPrint(TRACE_LEVEL_ERROR, ("%s: invalid Escape 0x%x\n", __FUNCTION__, pQXLEscape->ioctl));
-    //    status = STATUS_INVALID_PARAMETER;
-    //}
+    switch (ioctl) {
+    case QXL_ESCAPE_SET_CUSTOM_DISPLAY:
+        data_size += sizeof(QXLEscapeSetCustomDisplay);
+        break;
+    case QXL_ESCAPE_MONITOR_CONFIG:
+        data_size += sizeof(QXLHead);
+        break;
+    default:
+        if (pQXLEscape->ioctl < QXL_ESCAPE_SET_CUSTOM_DISPLAY) {
+            // Support old interface, with just a QXLEscapeSetCustomDisplay escape
+            ioctl = QXL_ESCAPE_SET_CUSTOM_DISPLAY;
+            data_size = sizeof(QXLEscapeSetCustomDisplay);
+            pCustomDisplay = (QXLEscapeSetCustomDisplay*)pEscape->pPrivateDriverData;
+        }
+    }
 
-    //if (status == STATUS_INVALID_BUFFER_SIZE) {
-    //    DbgPrint(TRACE_LEVEL_ERROR, ("%s invalid buffer size of %d, should be %d\n", __FUNCTION__,
-    //        pEscape->PrivateDriverDataSize, data_size));
-    //}
+    if (pEscape->PrivateDriverDataSize != data_size) {
+        status = STATUS_INVALID_BUFFER_SIZE;
+        DbgPrint(TRACE_LEVEL_ERROR, ("%s invalid buffer size of %d, should be %d\n", __FUNCTION__,
+                                     pEscape->PrivateDriverDataSize, data_size));
+    } else {
+        switch (ioctl) {
+        case QXL_ESCAPE_SET_CUSTOM_DISPLAY:
+            status = SetCustomDisplay(pCustomDisplay);
+            break;
+        case QXL_ESCAPE_MONITOR_CONFIG:
+            SetMonitorConfig(&pQXLEscape->monitor_config);
+            status = STATUS_SUCCESS;
+            break;
+        default:
+            DbgPrint(TRACE_LEVEL_ERROR, ("%s: invalid Escape 0x%x\n", __FUNCTION__, ioctl));
+            status = STATUS_INVALID_PARAMETER;
+        }
+    }
 
-    //return status;
-
-	if (pEscape->PrivateDriverDataSize != sizeof(QXLEscapeSetCustomDisplay)) {
-		return STATUS_INVALID_BUFFER_SIZE;
-	}
-	return SetCustomDisplay((QXLEscapeSetCustomDisplay *) pEscape->pPrivateDriverData);
+    return status;
 }
 
 VOID QxlDevice::WaitForCmdRing()
