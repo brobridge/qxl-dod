@@ -3631,21 +3631,18 @@ QxlDevice::ExecutePresentDisplayOnly(
     ctx->Mdl              = NULL;
     ctx->DisplaySource    = this;
 
-    // Alternate between synch and asynch execution, for demonstrating 
-    // that a real hardware implementation can do either
-
     {
         // Map Source into kernel space, as Blt will be executed by system worker thread
         UINT sizeToMap = ctx->SrcPitch * ctx->SrcHeight;
 
-        PMDL mdl = IoAllocateMdl((PVOID)SrcAddr, sizeToMap,  FALSE, FALSE, NULL);
-        if(!mdl)
+        PMDL mdl = IoAllocateMdl((PVOID)SrcAddr, sizeToMap, FALSE, FALSE, NULL);
+        if (!mdl)
         {
             return STATUS_INSUFFICIENT_RESOURCES;
         }
 
-        KPROCESSOR_MODE AccessMode = static_cast<KPROCESSOR_MODE>(( SrcAddr <=
-                        (BYTE* const) MM_USER_PROBE_ADDRESS)?UserMode:KernelMode);
+        KPROCESSOR_MODE AccessMode = static_cast<KPROCESSOR_MODE>((SrcAddr <=
+                        (BYTE* const)MM_USER_PROBE_ADDRESS) ? UserMode : KernelMode);
         __try
         {
             // Probe and lock the pages of this buffer in physical memory.
@@ -3653,7 +3650,7 @@ QxlDevice::ExecutePresentDisplayOnly(
             MmProbeAndLockPages(mdl, AccessMode, IoReadAccess);
         }
         #pragma prefast(suppress: __WARNING_EXCEPTIONEXECUTEHANDLER, "try/except is only able to protect against user-mode errors and these are the only errors we try to catch here");
-        __except(EXCEPTION_EXECUTE_HANDLER)
+        __except (EXCEPTION_EXECUTE_HANDLER)
         {
             Status = GetExceptionCode();
             IoFreeMdl(mdl);
@@ -3666,7 +3663,7 @@ QxlDevice::ExecutePresentDisplayOnly(
         ctx->SrcAddr = reinterpret_cast<BYTE*>
             (MmGetSystemAddressForMdlSafe(mdl, NormalPagePriority | MdlMappingNoExecute));
 
-        if(!ctx->SrcAddr) {
+        if (!ctx->SrcAddr) {
             Status = STATUS_INSUFFICIENT_RESOURCES;
             MmUnlockPages(mdl);
             IoFreeMdl(mdl);
@@ -3677,12 +3674,12 @@ QxlDevice::ExecutePresentDisplayOnly(
         ctx->Mdl = mdl;
     }
 
-    BYTE* rects = reinterpret_cast<BYTE*>(ctx+1);
+    BYTE* rects = reinterpret_cast<BYTE*>(ctx + 1);
 
     // copy moves and update pointer
     if (Moves)
     {
-        memcpy(rects,Moves,sizeMoves);
+        memcpy(rects, Moves, sizeMoves);
         ctx->Moves = reinterpret_cast<D3DKMT_MOVE_RECT*>(rects);
         rects += sizeMoves;
     }
@@ -3690,7 +3687,7 @@ QxlDevice::ExecutePresentDisplayOnly(
     // copy dirty rects and update pointer
     if (DirtyRect)
     {
-        memcpy(rects,DirtyRect,sizeRects);
+        memcpy(rects, DirtyRect, sizeRects);
         ctx->DirtyRect = reinterpret_cast<RECT*>(rects);
     }
 
