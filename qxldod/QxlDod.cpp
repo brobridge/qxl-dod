@@ -3299,6 +3299,21 @@ NTSTATUS QxlDevice::HWInit(PCM_RESOURCE_LIST pResList, DXGK_DISPLAY_INFORMATION*
     return QxlInit(pDispInfo);
 }
 
+NTSTATUS QxlDevice::StartPresentThread()
+{
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    InitializeObjectAttributes(&ObjectAttributes, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
+    m_PresentThread = NULL;
+    return PsCreateSystemThread(
+        &m_PresentThread,
+        THREAD_ALL_ACCESS,
+        &ObjectAttributes,
+        NULL,
+        NULL,
+        PresentThreadRoutineWrapper,
+        this);
+}
+
 NTSTATUS QxlDevice::QxlInit(DXGK_DISPLAY_INFORMATION* pDispInfo)
 {
     PAGED_CODE();
@@ -3324,7 +3339,7 @@ NTSTATUS QxlDevice::QxlInit(DXGK_DISPLAY_INFORMATION* pDispInfo)
     CreateMemSlots();
     InitDeviceMemoryResources();
     InitMonitorConfig();
-    return Status;
+    return StartPresentThread();
 }
 
 void QxlDevice::QxlClose()
@@ -3466,10 +3481,17 @@ BOOL QxlDevice::CreateEvents()
     KeInitializeEvent(&m_IoCmdEvent,
                       SynchronizationEvent,
                       FALSE);
+    KeInitializeEvent(&m_PresentEvent,
+                      SynchronizationEvent,
+                      FALSE);
+    KeInitializeEvent(&m_PresentThreadReadyEvent,
+                      SynchronizationEvent,
+                      FALSE);
     KeInitializeMutex(&m_MemLock,1);
     KeInitializeMutex(&m_CmdLock,1);
     KeInitializeMutex(&m_IoLock,1);
     KeInitializeMutex(&m_CrsLock,1);
+    KeInitializeMutex(&m_PresentLock,1);
 
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
     return TRUE;
@@ -3482,6 +3504,7 @@ BOOL QxlDevice::CreateRings()
     m_CommandRing = &(m_RamHdr->cmd_ring);
     m_CursorRing = &(m_RamHdr->cursor_ring);
     m_ReleaseRing = &(m_RamHdr->release_ring);
+    SPICE_RING_INIT(m_PresentRing);
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
     return TRUE;
 }
@@ -3599,6 +3622,8 @@ QxlDevice::ExecutePresentDisplayOnly(
 {
     PAGED_CODE();
     DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
+    UNREFERENCED_PARAMETER(DstAddr);
+    UNREFERENCED_PARAMETER(DstBitPerPixel);
 
     NTSTATUS Status = STATUS_SUCCESS;
 
@@ -3614,11 +3639,6 @@ QxlDevice::ExecutePresentDisplayOnly(
         return STATUS_NO_MEMORY;
     }
 
-    RtlZeroMemory(ctx,size);
-
-    ctx->DstAddr          = DstAddr;
-    ctx->DstBitPerPixel   = DstBitPerPixel;
-    ctx->DstStride        = pModeCur->DispInfo.Pitch;
     ctx->SrcWidth         = pModeCur->SrcModeWidth;
     ctx->SrcHeight        = pModeCur->SrcModeHeight;
     ctx->SrcAddr          = NULL;
@@ -3691,75 +3711,165 @@ QxlDevice::ExecutePresentDisplayOnly(
         ctx->DirtyRect = reinterpret_cast<RECT*>(rects);
     }
 
-    // Set up destination blt info
-    BLT_INFO DstBltInfo;
-    DstBltInfo.pBits = ctx->DstAddr;
-    DstBltInfo.Pitch = ctx->DstStride;
-    DstBltInfo.BitsPerPel = ctx->DstBitPerPixel;
-    DstBltInfo.Offset.x = 0;
-    DstBltInfo.Offset.y = 0;
-    DstBltInfo.Rotation = ctx->Rotation;
-    DstBltInfo.Width = ctx->SrcWidth;
-    DstBltInfo.Height = ctx->SrcHeight;
-
-    // Set up source blt info
-    BLT_INFO SrcBltInfo;
-    SrcBltInfo.pBits = ctx->SrcAddr;
-    SrcBltInfo.Pitch = ctx->SrcPitch;
-    SrcBltInfo.BitsPerPel = 32;
-    SrcBltInfo.Offset.x = 0;
-    SrcBltInfo.Offset.y = 0;
-    SrcBltInfo.Rotation = D3DKMDT_VPPR_IDENTITY;
-    if (ctx->Rotation == D3DKMDT_VPPR_ROTATE90 ||
-        ctx->Rotation == D3DKMDT_VPPR_ROTATE270)
-    {
-        SrcBltInfo.Width = DstBltInfo.Height;
-        SrcBltInfo.Height = DstBltInfo.Width;
+    // Push ctx into PresentRing and notify worker thread
+    BOOLEAN locked = FALSE;
+    int notify, wait;
+    locked = WaitForObject(&m_PresentLock, NULL); // TODO: Probably not needed
+    SPICE_RING_PROD_WAIT(m_PresentRing, wait);
+    while (wait) {
+        WaitForObject(&m_PresentThreadReadyEvent, NULL);
+        SPICE_RING_PROD_WAIT(m_PresentRing, wait);
     }
-    else
-    {
-        SrcBltInfo.Width = DstBltInfo.Width;
-        SrcBltInfo.Height = DstBltInfo.Height;
+    *SPICE_RING_PROD_ITEM(m_PresentRing) = ctx;
+    SPICE_RING_PUSH(m_PresentRing, notify);
+    if (notify) {
+        KeSetEvent(&m_PresentEvent, 0, FALSE);
     }
+    ReleaseMutex(&m_PresentLock, locked);
 
+    return STATUS_PENDING;
+}
 
-    // Copy all the scroll rects from source image to video frame buffer.
-    for (UINT i = 0; i < ctx->NumMoves; i++)
+KSYNCHRONIZE_ROUTINE SynchronizeVidSchNotifyInterrupt;
+
+typedef struct _SYNC_NOTIFY_INTERRUPT {
+    CONST DXGKRNL_INTERFACE*        DxgkInterface;
+    DXGKARGCB_NOTIFY_INTERRUPT_DATA NotifyInterrupt;
+} SYNC_NOTIFY_INTERRUPT;
+
+BOOLEAN SynchronizeVidSchNotifyInterrupt(_In_opt_ PVOID params)
+{
+    // This routine is non-paged code called at the device interrupt level (DIRQL)
+    // to notify VidSch and schedule a DPC.
+    SYNC_NOTIFY_INTERRUPT* pParam = reinterpret_cast<SYNC_NOTIFY_INTERRUPT*>(params);
+
+    // Callback OS to report about the interrupt
+    pParam->DxgkInterface->DxgkCbNotifyInterrupt(pParam->DxgkInterface->DeviceHandle, &pParam->NotifyInterrupt);
+
+    // Now queue a DPC for this interrupt (to callback schedule at DCP level and let it do more work there)
+    // DxgkCbQueueDpc can return FALSE if there is already a DPC queued
+    // this is an acceptable condition
+    pParam->DxgkInterface->DxgkCbQueueDpc(pParam->DxgkInterface->DeviceHandle);
+
+    return TRUE;
+}
+
+void QxlDevice::PresentThreadRoutine()
+{
+    PAGED_CODE();
+    int wait;
+    int notify;
+    DoPresentMemory *ctx;
+
+    DbgPrint(TRACE_LEVEL_VERBOSE, ("--->%s\n", __FUNCTION__));
+
+    while (1)
     {
-        POINT*   pSourcePoint = &ctx->Moves[i].SourcePoint;
-        RECT*    pDestRect = &ctx->Moves[i].DestRect;
+        // Pop a present context from the ring
+        // No need for a mutex, only one consumer thread
+        SPICE_RING_CONS_WAIT(m_PresentRing, wait);
+        while (wait) {
+            WaitForObject(&m_PresentEvent, NULL);
+            SPICE_RING_CONS_WAIT(m_PresentRing, wait);
+        }
+        ctx = *SPICE_RING_CONS_ITEM(m_PresentRing);
+        SPICE_RING_POP(m_PresentRing, notify);
+        if (notify) {
+            KeSetEvent(&m_PresentThreadReadyEvent, 0, FALSE);
+        }
 
-        DbgPrint(TRACE_LEVEL_INFORMATION, ("--- %d SourcePoint.x = %ld, SourcePoint.y = %ld, DestRect.bottom = %ld, DestRect.left = %ld, DestRect.right = %ld, DestRect.top = %ld\n", 
-            i , pSourcePoint->x, pSourcePoint->y, pDestRect->bottom, pDestRect->left, pDestRect->right, pDestRect->top));
+        // Set up destination blt info
+        BLT_INFO DstBltInfo;
+        DstBltInfo.pBits = ctx->DstAddr;
+        DstBltInfo.Pitch = ctx->DstStride;
+        DstBltInfo.BitsPerPel = ctx->DstBitPerPixel;
+        DstBltInfo.Offset.x = 0;
+        DstBltInfo.Offset.y = 0;
+        DstBltInfo.Rotation = ctx->Rotation;
+        DstBltInfo.Width = ctx->SrcWidth;
+        DstBltInfo.Height = ctx->SrcHeight;
 
-        BltBits(&DstBltInfo,
-        &SrcBltInfo,
-        1,
-        pDestRect);
+        // Set up source blt info
+        BLT_INFO SrcBltInfo;
+        SrcBltInfo.pBits = ctx->SrcAddr;
+        SrcBltInfo.Pitch = ctx->SrcPitch;
+        SrcBltInfo.BitsPerPel = 32;
+        SrcBltInfo.Offset.x = 0;
+        SrcBltInfo.Offset.y = 0;
+        SrcBltInfo.Rotation = D3DKMDT_VPPR_IDENTITY;
+        if (ctx->Rotation == D3DKMDT_VPPR_ROTATE90 ||
+            ctx->Rotation == D3DKMDT_VPPR_ROTATE270)
+        {
+            SrcBltInfo.Width = DstBltInfo.Height;
+            SrcBltInfo.Height = DstBltInfo.Width;
+        }
+        else
+        {
+            SrcBltInfo.Width = DstBltInfo.Width;
+            SrcBltInfo.Height = DstBltInfo.Height;
+        }
+
+
+        // Copy all the scroll rects from source image to video frame buffer.
+        for (UINT i = 0; i < ctx->NumMoves; i++)
+        {
+            POINT*   pSourcePoint = &ctx->Moves[i].SourcePoint;
+            RECT*    pDestRect = &ctx->Moves[i].DestRect;
+
+            DbgPrint(TRACE_LEVEL_INFORMATION, ("--- %d SourcePoint.x = %ld, SourcePoint.y = %ld, DestRect.bottom = %ld, DestRect.left = %ld, DestRect.right = %ld, DestRect.top = %ld\n",
+                i, pSourcePoint->x, pSourcePoint->y, pDestRect->bottom, pDestRect->left, pDestRect->right, pDestRect->top));
+
+            BltBits(&DstBltInfo,
+                &SrcBltInfo,
+                1,
+                pDestRect);
+        }
+
+        // Copy all the dirty rects from source image to video frame buffer.
+        for (UINT i = 0; i < ctx->NumDirtyRects; i++)
+        {
+            RECT*    pDirtyRect = &ctx->DirtyRect[i];
+            DbgPrint(TRACE_LEVEL_INFORMATION, ("--- %d pDirtyRect->bottom = %ld, pDirtyRect->left = %ld, pDirtyRect->right = %ld, pDirtyRect->top = %ld\n",
+                i, pDirtyRect->bottom, pDirtyRect->left, pDirtyRect->right, pDirtyRect->top));
+
+            BltBits(&DstBltInfo,
+                &SrcBltInfo,
+                1,
+                pDirtyRect);
+        }
+
+        FinishPresentDisplayOnly(ctx);
     }
+}
 
-    // Copy all the dirty rects from source image to video frame buffer.
-    for (UINT i = 0; i < ctx->NumDirtyRects; i++)
-    {
-        RECT*    pDirtyRect = &ctx->DirtyRect[i];
-        DbgPrint(TRACE_LEVEL_INFORMATION, ("--- %d pDirtyRect->bottom = %ld, pDirtyRect->left = %ld, pDirtyRect->right = %ld, pDirtyRect->top = %ld\n", 
-            i, pDirtyRect->bottom, pDirtyRect->left, pDirtyRect->right, pDirtyRect->top));
-
-        BltBits(&DstBltInfo,
-        &SrcBltInfo,
-        1,
-        pDirtyRect);
-    }
-
-    // Unmap unmap and unlock the pages.
+void QxlDevice::FinishPresentDisplayOnly(DoPresentMemory *ctx)
+{
+    // Unmap and unlock the pages.
     if (ctx->Mdl)
     {
         MmUnlockPages(ctx->Mdl);
         IoFreeMdl(ctx->Mdl);
     }
-    delete [] reinterpret_cast<BYTE*>(ctx);
 
-    return STATUS_SUCCESS;
+    // Signal the PresentDisplayOnly routine has finished
+    SYNC_NOTIFY_INTERRUPT SyncNotifyInterrupt = {};
+    SyncNotifyInterrupt.DxgkInterface = m_pQxlDod->GetDxgkInterface();
+    SyncNotifyInterrupt.NotifyInterrupt.InterruptType = DXGK_INTERRUPT_DISPLAYONLY_PRESENT_PROGRESS;
+    SyncNotifyInterrupt.NotifyInterrupt.DisplayOnlyPresentProgress.VidPnSourceId = 0;// VidPnSourceId;
+
+    SyncNotifyInterrupt.NotifyInterrupt.DisplayOnlyPresentProgress.ProgressId =
+        DXGK_PRESENT_DISPLAYONLY_PROGRESS_ID_COMPLETE;
+
+    // Execute the SynchronizeVidSchNotifyInterrupt function at the interrupt
+    // IRQL in order to fake a real present progress interrupt
+    BOOLEAN bRet = FALSE;
+    NT_VERIFY(NT_SUCCESS(m_pQxlDod->GetDxgkInterface()->DxgkCbSynchronizeExecution(
+        m_pQxlDod->GetDxgkInterface()->DeviceHandle,
+        (PKSYNCHRONIZE_ROUTINE)SynchronizeVidSchNotifyInterrupt,
+        (PVOID)&SyncNotifyInterrupt, 0, &bRet)));
+    NT_ASSERT(bRet);
+
+    delete[] reinterpret_cast<BYTE*>(ctx);
 }
 
 void QxlDevice::WaitForReleaseRing(void)
