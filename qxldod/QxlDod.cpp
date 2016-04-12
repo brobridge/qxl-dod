@@ -4234,7 +4234,7 @@ VOID QxlDevice::BltBits (
     chunk->prev_chunk = 0;
     chunk->next_chunk = 0;
     internal->image.bitmap.data = PA(chunk, m_SurfaceMemSlot);
-    internal->image.bitmap.flags = 0;
+    internal->image.bitmap.flags = QXL_BITMAP_TOP_DOWN;
     internal->image.descriptor.width = internal->image.bitmap.x = width;
     internal->image.descriptor.height = internal->image.bitmap.y = height;
     internal->image.bitmap.format = SPICE_BITMAP_FMT_RGBA;
@@ -4243,13 +4243,12 @@ VOID QxlDevice::BltBits (
     UINT8* src = (UINT8*)pSrc->pBits+
                                 (pRect->top) * pSrc->Pitch +
                                 (pRect->left * 4);
-    UINT8* src_end = src - pSrc->Pitch;
-    src += pSrc->Pitch * (height - 1);
+    UINT8* src_end = src + pSrc->Pitch * height;
     UINT8* dest = chunk->data;
     UINT8* dest_end = (UINT8 *)image_res + alloc_size;
     alloc_size = height * line_size;
 
-    for (; src != src_end; src -= pSrc->Pitch, alloc_size -= line_size) {
+    for (; src != src_end; src += pSrc->Pitch, alloc_size -= line_size) {
         PutBytesAlign(&chunk, &dest, &dest_end, src,
                       line_size, alloc_size, line_size);
     }
