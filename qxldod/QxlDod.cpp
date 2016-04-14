@@ -500,48 +500,136 @@ NTSTATUS QxlDod::PresentDisplayOnly(_In_ CONST DXGKARG_PRESENT_DISPLAYONLY* pPre
 
     // If it is in monitor off state or source is not supposed to be visible, don't present anything to the screen
     if ((m_MonitorPowerState > PowerDeviceD0) ||
-        (m_CurrentModes[pPresentDisplayOnly->VidPnSourceId].Flags.SourceNotVisible))
+        m_CurrentModes[pPresentDisplayOnly->VidPnSourceId].Flags.SourceNotVisible ||
+        !m_CurrentModes[pPresentDisplayOnly->VidPnSourceId].Flags.FrameBufferIsActive)
     {
         DbgPrint(TRACE_LEVEL_ERROR, ("<--- %s\n", __FUNCTION__));
         return STATUS_SUCCESS;
     }
 
-    if (m_CurrentModes[pPresentDisplayOnly->VidPnSourceId].Flags.FrameBufferIsActive)
+    // If actual pixels are coming through, will need to completely zero out physical address next time in BlackOutScreen
+    m_CurrentModes[pPresentDisplayOnly->VidPnSourceId].ZeroedOutStart.QuadPart = 0;
+    m_CurrentModes[pPresentDisplayOnly->VidPnSourceId].ZeroedOutEnd.QuadPart = 0;
+
+    D3DKMDT_VIDPN_PRESENT_PATH_ROTATION RotationNeededByFb = pPresentDisplayOnly->Flags.Rotate ?
+                                                                m_CurrentModes[pPresentDisplayOnly->VidPnSourceId].Rotation :
+                                                                D3DKMDT_VPPR_IDENTITY;
+    BYTE* pDst = (BYTE*)m_CurrentModes[pPresentDisplayOnly->VidPnSourceId].FrameBuffer.Ptr;
+    UINT DstBitPerPixel = BPPFromPixelFormat(m_CurrentModes[pPresentDisplayOnly->VidPnSourceId].DispInfo.ColorFormat);
+    if (m_CurrentModes[pPresentDisplayOnly->VidPnSourceId].Scaling == D3DKMDT_VPPS_CENTERED)
     {
-
-        // If actual pixels are coming through, will need to completely zero out physical address next time in BlackOutScreen
-        m_CurrentModes[pPresentDisplayOnly->VidPnSourceId].ZeroedOutStart.QuadPart = 0;
-        m_CurrentModes[pPresentDisplayOnly->VidPnSourceId].ZeroedOutEnd.QuadPart = 0;
-
-
-        D3DKMDT_VIDPN_PRESENT_PATH_ROTATION RotationNeededByFb = pPresentDisplayOnly->Flags.Rotate ?
-                                                                 m_CurrentModes[pPresentDisplayOnly->VidPnSourceId].Rotation :
-                                                                 D3DKMDT_VPPR_IDENTITY;
-        BYTE* pDst = (BYTE*)m_CurrentModes[pPresentDisplayOnly->VidPnSourceId].FrameBuffer.Ptr;
-        UINT DstBitPerPixel = BPPFromPixelFormat(m_CurrentModes[pPresentDisplayOnly->VidPnSourceId].DispInfo.ColorFormat);
-        if (m_CurrentModes[pPresentDisplayOnly->VidPnSourceId].Scaling == D3DKMDT_VPPS_CENTERED)
-        {
-            UINT CenterShift = (m_CurrentModes[pPresentDisplayOnly->VidPnSourceId].DispInfo.Height -
-                m_CurrentModes[pPresentDisplayOnly->VidPnSourceId].SrcModeHeight)*m_CurrentModes[pPresentDisplayOnly->VidPnSourceId].DispInfo.Pitch;
-            CenterShift += (m_CurrentModes[pPresentDisplayOnly->VidPnSourceId].DispInfo.Width -
-                m_CurrentModes[pPresentDisplayOnly->VidPnSourceId].SrcModeWidth)*DstBitPerPixel/8;
-            pDst += (int)CenterShift/2;
-        }
-        Status = m_pHWDevice->ExecutePresentDisplayOnly(
-                            pDst,
-                            DstBitPerPixel,
-                            (BYTE*)pPresentDisplayOnly->pSource,
-                            pPresentDisplayOnly->BytesPerPixel,
-                            pPresentDisplayOnly->Pitch,
-                            pPresentDisplayOnly->NumMoves,
-                            pPresentDisplayOnly->pMoves,
-                            pPresentDisplayOnly->NumDirtyRects,
-                            pPresentDisplayOnly->pDirtyRect,
-                            RotationNeededByFb,
-                            &m_CurrentModes[0]);
+        UINT CenterShift = (m_CurrentModes[pPresentDisplayOnly->VidPnSourceId].DispInfo.Height -
+            m_CurrentModes[pPresentDisplayOnly->VidPnSourceId].SrcModeHeight)*m_CurrentModes[pPresentDisplayOnly->VidPnSourceId].DispInfo.Pitch;
+        CenterShift += (m_CurrentModes[pPresentDisplayOnly->VidPnSourceId].DispInfo.Width -
+            m_CurrentModes[pPresentDisplayOnly->VidPnSourceId].SrcModeWidth)*DstBitPerPixel/8;
+        pDst += (int)CenterShift/2;
     }
+
+    PMDL mdl;
+    BYTE* sysAddr;
+    if ((Status = MapSourceIntoSystemSpace(pPresentDisplayOnly, mdl, sysAddr)) != STATUS_SUCCESS)
+        return Status;
+
+    SIZE_T sizeMoves = pPresentDisplayOnly->NumMoves*sizeof(D3DKMT_MOVE_RECT);
+    SIZE_T sizeRects = pPresentDisplayOnly->NumDirtyRects*sizeof(RECT);
+    SIZE_T ctxSize = sizeof(DoPresentMemory) + sizeMoves + sizeRects;
+
+    DoPresentMemory* ctx = reinterpret_cast<DoPresentMemory*>(new (NonPagedPoolNx)BYTE[ctxSize]);
+
+    if (!ctx)
+    {
+        MmUnlockPages(mdl);
+        IoFreeMdl(mdl);
+        return STATUS_NO_MEMORY;
+    }
+
+    ctx->DstAddr = pDst;
+    ctx->DstBitPerPixel = DstBitPerPixel;
+    ctx->DstStride = m_CurrentModes[pPresentDisplayOnly->VidPnSourceId].DispInfo.Pitch;
+    ctx->SrcWidth = m_CurrentModes[pPresentDisplayOnly->VidPnSourceId].SrcModeWidth;
+    ctx->SrcHeight = m_CurrentModes[pPresentDisplayOnly->VidPnSourceId].SrcModeHeight;
+    ctx->SrcAddr = sysAddr;
+    ctx->SrcPitch = pPresentDisplayOnly->Pitch;
+    ctx->Rotation = RotationNeededByFb;
+    ctx->NumMoves = pPresentDisplayOnly->NumMoves;
+    ctx->Moves = pPresentDisplayOnly->pMoves;
+    ctx->NumDirtyRects = pPresentDisplayOnly->NumDirtyRects;
+    ctx->DirtyRect = pPresentDisplayOnly->pDirtyRect;
+    ctx->DisplaySource = m_pHWDevice;
+    ctx->Mdl = mdl;
+
+    BYTE* rects = reinterpret_cast<BYTE*>(ctx + 1);
+
+    // copy moves and update pointer
+    if (pPresentDisplayOnly->pMoves)
+    {
+        memcpy(rects, pPresentDisplayOnly->pMoves, sizeMoves);
+        ctx->Moves = reinterpret_cast<D3DKMT_MOVE_RECT*>(rects);
+        rects += sizeMoves;
+    }
+
+    // copy dirty rects and update pointer
+    if (pPresentDisplayOnly->pDirtyRect)
+    {
+        memcpy(rects, pPresentDisplayOnly->pDirtyRect, sizeRects);
+        ctx->DirtyRect = reinterpret_cast<RECT*>(rects);
+    }
+
+    Status = m_pHWDevice->ExecutePresentDisplayOnly(ctx);
+
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
     return Status;
+}
+
+NTSTATUS QxlDod::MapSourceIntoSystemSpace(_In_ CONST DXGKARG_PRESENT_DISPLAYONLY* pPresentDisplayOnly,
+                                          PMDL & mdl, BYTE* & sysAddr)
+{
+    PAGED_CODE();
+    LONG maxHeight = 0;
+    for (ULONG i = 0; i < pPresentDisplayOnly->NumMoves; ++i)
+        if (pPresentDisplayOnly->pMoves[i].DestRect.bottom > maxHeight)
+            maxHeight = pPresentDisplayOnly->pMoves[i].DestRect.bottom;
+    for (ULONG i = 0; i < pPresentDisplayOnly->NumDirtyRects; ++i)
+        if (pPresentDisplayOnly->pDirtyRect[i].bottom > maxHeight)
+            maxHeight = pPresentDisplayOnly->pDirtyRect[i].bottom;
+    UINT mapSize = pPresentDisplayOnly->Pitch * maxHeight;
+
+    mdl = IoAllocateMdl(pPresentDisplayOnly->pSource, mapSize, FALSE, FALSE, NULL);
+    if (!mdl)
+    {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    KPROCESSOR_MODE AccessMode =
+        static_cast<KPROCESSOR_MODE>(pPresentDisplayOnly->pSource <= (PVOID)MM_USER_PROBE_ADDRESS ?
+                                     UserMode : KernelMode);
+    __try
+    {
+        // Probe and lock the pages of this buffer in physical memory.
+        // We need only IoReadAccess.
+        MmProbeAndLockPages(mdl, AccessMode, IoReadAccess);
+    }
+    #pragma prefast(suppress: __WARNING_EXCEPTIONEXECUTEHANDLER, "try/except is only able to protect against user-mode errors and these are the only errors we try to catch here");
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        NTSTATUS Status = GetExceptionCode();
+        IoFreeMdl(mdl);
+        return Status;
+    }
+
+    // Map the physical pages described by the MDL into system space.
+    // Note: double mapping the buffer this way causes lot of system
+    // overhead for large size buffers.
+    sysAddr = reinterpret_cast<BYTE*>
+        (MmGetSystemAddressForMdlSafe(mdl, NormalPagePriority | MdlMappingNoExecute));
+
+    if (!sysAddr) {
+        MmUnlockPages(mdl);
+        IoFreeMdl(mdl);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS QxlDod::QueryInterface(_In_ CONST PQUERY_INTERFACE pQueryInterface)
@@ -2617,142 +2705,10 @@ NTSTATUS VgaDevice::SetPowerState(DEVICE_POWER_STATE DevicePowerState, DXGK_DISP
 }
 
 NTSTATUS
-VgaDevice::ExecutePresentDisplayOnly(
-    _In_ BYTE*             DstAddr,
-    _In_ UINT              DstBitPerPixel,
-    _In_ BYTE*             SrcAddr,
-    _In_ UINT              SrcBytesPerPixel,
-    _In_ LONG              SrcPitch,
-    _In_ ULONG             NumMoves,
-    _In_ D3DKMT_MOVE_RECT* Moves,
-    _In_ ULONG             NumDirtyRects,
-    _In_ RECT*             DirtyRect,
-    _In_ D3DKMDT_VIDPN_PRESENT_PATH_ROTATION Rotation,
-    _In_ const CURRENT_BDD_MODE* pModeCur)
-/*++
-
-  Routine Description:
-
-    The method creates present worker thread and provides context
-    for it filled with present commands
-
-  Arguments:
-
-    DstAddr - address of destination surface
-    DstBitPerPixel - color depth of destination surface
-    SrcAddr - address of source surface
-    SrcBytesPerPixel - bytes per pixel of source surface
-    SrcPitch - source surface pitch (bytes in a row)
-    NumMoves - number of moves to be copied
-    Moves - moves' data
-    NumDirtyRects - number of rectangles to be copied
-    DirtyRect - rectangles' data
-    Rotation - roatation to be performed when executing copy
-    CallBack - callback for present worker thread to report execution status
-
-  Return Value:
-
-    Status
-
---*/
+VgaDevice::ExecutePresentDisplayOnly(DoPresentMemory* ctx)
 {
-
     PAGED_CODE();
     DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
-
-    NTSTATUS Status = STATUS_SUCCESS;
-
-    SIZE_T sizeMoves = NumMoves*sizeof(D3DKMT_MOVE_RECT);
-    SIZE_T sizeRects = NumDirtyRects*sizeof(RECT);
-    SIZE_T size = sizeof(DoPresentMemory) + sizeMoves + sizeRects;
-
-    DoPresentMemory* ctx = reinterpret_cast<DoPresentMemory*>
-                                (new (NonPagedPoolNx) BYTE[size]);
-
-    if (!ctx)
-    {
-        return STATUS_NO_MEMORY;
-    }
-
-    RtlZeroMemory(ctx,size);
-
-    ctx->DstAddr          = DstAddr;
-    ctx->DstBitPerPixel   = DstBitPerPixel;
-    ctx->DstStride        = pModeCur->DispInfo.Pitch;
-    ctx->SrcWidth         = pModeCur->SrcModeWidth;
-    ctx->SrcHeight        = pModeCur->SrcModeHeight;
-    ctx->SrcAddr          = NULL;
-    ctx->SrcPitch         = SrcPitch;
-    ctx->Rotation         = Rotation;
-    ctx->NumMoves         = NumMoves;
-    ctx->Moves            = Moves;
-    ctx->NumDirtyRects    = NumDirtyRects;
-    ctx->DirtyRect        = DirtyRect;
-    ctx->Mdl              = NULL;
-    ctx->DisplaySource    = this;
-
-    // Alternate between synch and asynch execution, for demonstrating 
-    // that a real hardware implementation can do either
-
-    {
-        // Map Source into kernel space, as Blt will be executed by system worker thread
-        UINT sizeToMap = SrcBytesPerPixel * ctx->SrcWidth * ctx->SrcHeight;
-
-        PMDL mdl = IoAllocateMdl((PVOID)SrcAddr, sizeToMap,  FALSE, FALSE, NULL);
-        if(!mdl)
-        {
-            return STATUS_INSUFFICIENT_RESOURCES;
-        }
-
-        KPROCESSOR_MODE AccessMode = static_cast<KPROCESSOR_MODE>(( SrcAddr <=
-                        (BYTE* const) MM_USER_PROBE_ADDRESS)?UserMode:KernelMode);
-        __try
-        {
-            // Probe and lock the pages of this buffer in physical memory.
-            // We need only IoReadAccess.
-            MmProbeAndLockPages(mdl, AccessMode, IoReadAccess);
-        }
-        #pragma prefast(suppress: __WARNING_EXCEPTIONEXECUTEHANDLER, "try/except is only able to protect against user-mode errors and these are the only errors we try to catch here");
-        __except(EXCEPTION_EXECUTE_HANDLER)
-        {
-            Status = GetExceptionCode();
-            IoFreeMdl(mdl);
-            return Status;
-        }
-
-        // Map the physical pages described by the MDL into system space.
-        // Note: double mapping the buffer this way causes lot of system
-        // overhead for large size buffers.
-        ctx->SrcAddr = reinterpret_cast<BYTE*>
-            (MmGetSystemAddressForMdlSafe(mdl, NormalPagePriority | MdlMappingNoExecute));
-
-        if(!ctx->SrcAddr) {
-            Status = STATUS_INSUFFICIENT_RESOURCES;
-            MmUnlockPages(mdl);
-            IoFreeMdl(mdl);
-            return Status;
-        }
-
-        // Save Mdl to unmap and unlock the pages in worker thread
-        ctx->Mdl = mdl;
-    }
-
-    BYTE* rects = reinterpret_cast<BYTE*>(ctx+1);
-
-    // copy moves and update pointer
-    if (Moves)
-    {
-        memcpy(rects,Moves,sizeMoves);
-        ctx->Moves = reinterpret_cast<D3DKMT_MOVE_RECT*>(rects);
-        rects += sizeMoves;
-    }
-
-    // copy dirty rects and update pointer
-    if (DirtyRect)
-    {
-        memcpy(rects,DirtyRect,sizeRects);
-        ctx->DirtyRect = reinterpret_cast<RECT*>(rects);
-    }
 
     // Set up destination blt info
     BLT_INFO DstBltInfo;
@@ -3607,109 +3563,10 @@ void QxlDevice::InitMspace(UINT32 mspace_type, UINT8 *start, size_t capacity)
 }
 
 NTSTATUS
-QxlDevice::ExecutePresentDisplayOnly(
-    _In_ BYTE*             DstAddr,
-    _In_ UINT              DstBitPerPixel,
-    _In_ BYTE*             SrcAddr,
-    _In_ UINT              SrcBytesPerPixel,
-    _In_ LONG              SrcPitch,
-    _In_ ULONG             NumMoves,
-    _In_ D3DKMT_MOVE_RECT* Moves,
-    _In_ ULONG             NumDirtyRects,
-    _In_ RECT*             DirtyRect,
-    _In_ D3DKMDT_VIDPN_PRESENT_PATH_ROTATION Rotation,
-    _In_ const CURRENT_BDD_MODE* pModeCur)
+QxlDevice::ExecutePresentDisplayOnly(DoPresentMemory * ctx)
 {
     PAGED_CODE();
     DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
-    UNREFERENCED_PARAMETER(DstAddr);
-    UNREFERENCED_PARAMETER(DstBitPerPixel);
-
-    NTSTATUS Status = STATUS_SUCCESS;
-
-    SIZE_T sizeMoves = NumMoves*sizeof(D3DKMT_MOVE_RECT);
-    SIZE_T sizeRects = NumDirtyRects*sizeof(RECT);
-    SIZE_T size = sizeof(DoPresentMemory) + sizeMoves + sizeRects;
-
-    DoPresentMemory* ctx = reinterpret_cast<DoPresentMemory*>
-                                (new (NonPagedPoolNx) BYTE[size]);
-
-    if (!ctx)
-    {
-        return STATUS_NO_MEMORY;
-    }
-
-    ctx->SrcWidth         = pModeCur->SrcModeWidth;
-    ctx->SrcHeight        = pModeCur->SrcModeHeight;
-    ctx->SrcAddr          = NULL;
-    ctx->SrcPitch         = SrcPitch;
-    ctx->Rotation         = Rotation;
-    ctx->NumMoves         = NumMoves;
-    ctx->Moves            = Moves;
-    ctx->NumDirtyRects    = NumDirtyRects;
-    ctx->DirtyRect        = DirtyRect;
-    ctx->Mdl              = NULL;
-    ctx->DisplaySource    = this;
-
-    {
-        // Map Source into kernel space, as Blt will be executed by system worker thread
-        UINT sizeToMap = ctx->SrcPitch * ctx->SrcHeight;
-
-        PMDL mdl = IoAllocateMdl((PVOID)SrcAddr, sizeToMap, FALSE, FALSE, NULL);
-        if (!mdl)
-        {
-            return STATUS_INSUFFICIENT_RESOURCES;
-        }
-
-        KPROCESSOR_MODE AccessMode = static_cast<KPROCESSOR_MODE>((SrcAddr <=
-                        (BYTE* const)MM_USER_PROBE_ADDRESS) ? UserMode : KernelMode);
-        __try
-        {
-            // Probe and lock the pages of this buffer in physical memory.
-            // We need only IoReadAccess.
-            MmProbeAndLockPages(mdl, AccessMode, IoReadAccess);
-        }
-        #pragma prefast(suppress: __WARNING_EXCEPTIONEXECUTEHANDLER, "try/except is only able to protect against user-mode errors and these are the only errors we try to catch here");
-        __except (EXCEPTION_EXECUTE_HANDLER)
-        {
-            Status = GetExceptionCode();
-            IoFreeMdl(mdl);
-            return Status;
-        }
-
-        // Map the physical pages described by the MDL into system space.
-        // Note: double mapping the buffer this way causes lot of system
-        // overhead for large size buffers.
-        ctx->SrcAddr = reinterpret_cast<BYTE*>
-            (MmGetSystemAddressForMdlSafe(mdl, NormalPagePriority | MdlMappingNoExecute));
-
-        if (!ctx->SrcAddr) {
-            Status = STATUS_INSUFFICIENT_RESOURCES;
-            MmUnlockPages(mdl);
-            IoFreeMdl(mdl);
-            return Status;
-        }
-
-        // Save Mdl to unmap and unlock the pages in worker thread
-        ctx->Mdl = mdl;
-    }
-
-    BYTE* rects = reinterpret_cast<BYTE*>(ctx + 1);
-
-    // copy moves and update pointer
-    if (Moves)
-    {
-        memcpy(rects, Moves, sizeMoves);
-        ctx->Moves = reinterpret_cast<D3DKMT_MOVE_RECT*>(rects);
-        rects += sizeMoves;
-    }
-
-    // copy dirty rects and update pointer
-    if (DirtyRect)
-    {
-        memcpy(rects, DirtyRect, sizeRects);
-        ctx->DirtyRect = reinterpret_cast<RECT*>(rects);
-    }
 
     // Push ctx into PresentRing and notify worker thread
     BOOLEAN locked = FALSE;

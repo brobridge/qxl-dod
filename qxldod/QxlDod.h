@@ -246,17 +246,7 @@ public:
     USHORT GetCurrentModeIndex(void) {return m_CurrentMode;}
     VOID SetCurrentModeIndex(USHORT idx) {m_CurrentMode = idx;}
     virtual BOOLEAN EnablePointer(void) = 0;
-    virtual NTSTATUS ExecutePresentDisplayOnly(_In_ BYTE*             DstAddr,
-                                 _In_ UINT              DstBitPerPixel,
-                                 _In_ BYTE*             SrcAddr,
-                                 _In_ UINT              SrcBytesPerPixel,
-                                 _In_ LONG              SrcPitch,
-                                 _In_ ULONG             NumMoves,
-                                 _In_ D3DKMT_MOVE_RECT* pMoves,
-                                 _In_ ULONG             NumDirtyRects,
-                                 _In_ RECT*             pDirtyRect,
-                                 _In_ D3DKMDT_VIDPN_PRESENT_PATH_ROTATION Rotation,
-                                 _In_ const CURRENT_BDD_MODE* pModeCur) = 0;
+    virtual NTSTATUS ExecutePresentDisplayOnly(DoPresentMemory * ctx) = 0;
 
     virtual VOID BlackOutScreen(CURRENT_BDD_MODE* pCurrentBddMod) = 0;
     virtual NTSTATUS SetPointerShape(_In_ CONST DXGKARG_SETPOINTERSHAPE* pSetPointerShape) = 0;
@@ -290,17 +280,7 @@ public:
     NTSTATUS HWInit(PCM_RESOURCE_LIST pResList, DXGK_DISPLAY_INFORMATION* pDispInfo);
     NTSTATUS HWClose(void);
     BOOLEAN EnablePointer(void) { return FALSE; }
-    NTSTATUS ExecutePresentDisplayOnly(_In_ BYTE*             DstAddr,
-                                 _In_ UINT              DstBitPerPixel,
-                                 _In_ BYTE*             SrcAddr,
-                                 _In_ UINT              SrcBytesPerPixel,
-                                 _In_ LONG              SrcPitch,
-                                 _In_ ULONG             NumMoves,
-                                 _In_ D3DKMT_MOVE_RECT* pMoves,
-                                 _In_ ULONG             NumDirtyRects,
-                                 _In_ RECT*             pDirtyRect,
-                                 _In_ D3DKMDT_VIDPN_PRESENT_PATH_ROTATION Rotation,
-                                 _In_ const CURRENT_BDD_MODE* pModeCur);
+    NTSTATUS ExecutePresentDisplayOnly(DoPresentMemory * ctx);
     VOID BlackOutScreen(CURRENT_BDD_MODE* pCurrentBddMod);
     BOOLEAN HWInterruptRoutine(_In_ PDXGKRNL_INTERFACE pDxgkInterface, _In_  ULONG MessageNumber);
     VOID HWDpcRoutine(PDXGKRNL_INTERFACE pDxgkInterface);
@@ -467,17 +447,7 @@ public:
     NTSTATUS HWInit(PCM_RESOURCE_LIST pResList, DXGK_DISPLAY_INFORMATION* pDispInfo);
     NTSTATUS HWClose(void);
     BOOLEAN EnablePointer(void) { return TRUE; }
-    NTSTATUS ExecutePresentDisplayOnly(_In_ BYTE*             DstAddr,
-                    _In_ UINT              DstBitPerPixel,
-                    _In_ BYTE*             SrcAddr,
-                    _In_ UINT              SrcBytesPerPixel,
-                    _In_ LONG              SrcPitch,
-                    _In_ ULONG             NumMoves,
-                    _In_ D3DKMT_MOVE_RECT* pMoves,
-                    _In_ ULONG             NumDirtyRects,
-                    _In_ RECT*             pDirtyRect,
-                    _In_ D3DKMDT_VIDPN_PRESENT_PATH_ROTATION Rotation,
-                    _In_ const CURRENT_BDD_MODE* pModeCur);
+    NTSTATUS ExecutePresentDisplayOnly(DoPresentMemory * ctx);
     VOID BlackOutScreen(CURRENT_BDD_MODE* pCurrentBddMod);
     BOOLEAN HWInterruptRoutine(_In_ PDXGKRNL_INTERFACE pDxgkInterface, _In_  ULONG MessageNumber);
     VOID HWDpcRoutine(PDXGKRNL_INTERFACE pDxgkInterface);
@@ -668,7 +638,6 @@ public:
                                    _Inout_ DXGK_DEVICE_DESCRIPTOR* pDeviceDescriptor);
 
     // Must be Non-Paged
-    // BDD doesn't have interrupts, so just returns false
     BOOLEAN InterruptRoutine(_In_  ULONG MessageNumber);
 
     VOID DpcRoutine(VOID);
@@ -750,6 +719,8 @@ private:
     NTSTATUS IsVidPnSourceModeFieldsValid(CONST D3DKMDT_VIDPN_SOURCE_MODE* pSourceMode) const;
     NTSTATUS IsVidPnPathFieldsValid(CONST D3DKMDT_VIDPN_PRESENT_PATH* pPath) const;
     NTSTATUS RegisterHWInfo(_In_ ULONG Id);
+    NTSTATUS MapSourceIntoSystemSpace(_In_ CONST DXGKARG_PRESENT_DISPLAYONLY* pPresentDisplayOnly,
+                                      PMDL & mdl, BYTE* & sysAddr);
 };
 
 NTSTATUS
