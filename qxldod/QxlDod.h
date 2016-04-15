@@ -430,7 +430,7 @@ typedef struct DpcCbContext {
 #define ALIGN(a, b) (((a) + ((b) - 1)) & ~((b) - 1))
 
 #include "start-packed.h"
-SPICE_RING_DECLARE(QXLPresentOnlyRing, DoPresentMemory*, 8);
+SPICE_RING_DECLARE(QXLPresentOnlyRing, QXLDrawable**, 8);
 #include "end-packed.h"
 
 class QxlDevice  :
@@ -457,10 +457,6 @@ public:
     NTSTATUS Escape(_In_ CONST DXGKARG_ESCAPE* pEscap);
 protected:
     NTSTATUS GetModeList(DXGK_DISPLAY_INFORMATION* pDispInfo);
-    VOID BltBits (BLT_INFO* pDst,
-                    CONST BLT_INFO* pSrc,
-                    UINT  NumRects,
-                    _In_reads_(NumRects) CONST RECT *pRects);
     QXLDrawable *Drawable(UINT8 type,
                     CONST RECT *area,
                     CONST RECT *clip,
@@ -530,7 +526,7 @@ private:
     static void PresentThreadRoutineWrapper(HANDLE dev) {
         ((QxlDevice *)dev)->PresentThreadRoutine();
     }
-    void FinishPresentDisplayOnly(DoPresentMemory *ctx);
+    QXLDrawable* DrawableFromRect(DoPresentMemory *ctx, CONST RECT* pRect);
 
 private:
     PUCHAR m_IoBase;

@@ -530,52 +530,28 @@ NTSTATUS QxlDod::PresentDisplayOnly(_In_ CONST DXGKARG_PRESENT_DISPLAYONLY* pPre
     if ((Status = MapSourceIntoSystemSpace(pPresentDisplayOnly, mdl, sysAddr)) != STATUS_SUCCESS)
         return Status;
 
-    SIZE_T sizeMoves = pPresentDisplayOnly->NumMoves*sizeof(D3DKMT_MOVE_RECT);
-    SIZE_T sizeRects = pPresentDisplayOnly->NumDirtyRects*sizeof(RECT);
-    SIZE_T ctxSize = sizeof(DoPresentMemory) + sizeMoves + sizeRects;
+    DoPresentMemory ctx;
 
-    DoPresentMemory* ctx = reinterpret_cast<DoPresentMemory*>(new (NonPagedPoolNx)BYTE[ctxSize]);
+    ctx.DstAddr = pDst;
+    ctx.DstBitPerPixel = DstBitPerPixel;
+    ctx.DstStride = m_CurrentModes[pPresentDisplayOnly->VidPnSourceId].DispInfo.Pitch;
+    ctx.SrcWidth = m_CurrentModes[pPresentDisplayOnly->VidPnSourceId].SrcModeWidth;
+    ctx.SrcHeight = m_CurrentModes[pPresentDisplayOnly->VidPnSourceId].SrcModeHeight;
+    ctx.SrcAddr = sysAddr;
+    ctx.SrcPitch = pPresentDisplayOnly->Pitch;
+    ctx.Rotation = RotationNeededByFb;
+    ctx.NumMoves = pPresentDisplayOnly->NumMoves;
+    ctx.Moves = pPresentDisplayOnly->pMoves;
+    ctx.NumDirtyRects = pPresentDisplayOnly->NumDirtyRects;
+    ctx.DirtyRect = pPresentDisplayOnly->pDirtyRect;
+    ctx.DisplaySource = m_pHWDevice;
+    ctx.Mdl = mdl;
 
-    if (!ctx)
-    {
-        MmUnlockPages(mdl);
-        IoFreeMdl(mdl);
-        return STATUS_NO_MEMORY;
-    }
+    Status = m_pHWDevice->ExecutePresentDisplayOnly(&ctx);
 
-    ctx->DstAddr = pDst;
-    ctx->DstBitPerPixel = DstBitPerPixel;
-    ctx->DstStride = m_CurrentModes[pPresentDisplayOnly->VidPnSourceId].DispInfo.Pitch;
-    ctx->SrcWidth = m_CurrentModes[pPresentDisplayOnly->VidPnSourceId].SrcModeWidth;
-    ctx->SrcHeight = m_CurrentModes[pPresentDisplayOnly->VidPnSourceId].SrcModeHeight;
-    ctx->SrcAddr = sysAddr;
-    ctx->SrcPitch = pPresentDisplayOnly->Pitch;
-    ctx->Rotation = RotationNeededByFb;
-    ctx->NumMoves = pPresentDisplayOnly->NumMoves;
-    ctx->Moves = pPresentDisplayOnly->pMoves;
-    ctx->NumDirtyRects = pPresentDisplayOnly->NumDirtyRects;
-    ctx->DirtyRect = pPresentDisplayOnly->pDirtyRect;
-    ctx->DisplaySource = m_pHWDevice;
-    ctx->Mdl = mdl;
-
-    BYTE* rects = reinterpret_cast<BYTE*>(ctx + 1);
-
-    // copy moves and update pointer
-    if (pPresentDisplayOnly->pMoves)
-    {
-        memcpy(rects, pPresentDisplayOnly->pMoves, sizeMoves);
-        ctx->Moves = reinterpret_cast<D3DKMT_MOVE_RECT*>(rects);
-        rects += sizeMoves;
-    }
-
-    // copy dirty rects and update pointer
-    if (pPresentDisplayOnly->pDirtyRect)
-    {
-        memcpy(rects, pPresentDisplayOnly->pDirtyRect, sizeRects);
-        ctx->DirtyRect = reinterpret_cast<RECT*>(rects);
-    }
-
-    Status = m_pHWDevice->ExecutePresentDisplayOnly(ctx);
+    // Unmap and unlock the pages.
+    MmUnlockPages(ctx.Mdl);
+    IoFreeMdl(ctx.Mdl);
 
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
     return Status;
@@ -2762,14 +2738,6 @@ VgaDevice::ExecutePresentDisplayOnly(DoPresentMemory* ctx)
         pDirtyRect);
     } 
 
-    // Unmap unmap and unlock the pages.
-    if (ctx->Mdl)
-    {
-        MmUnlockPages(ctx->Mdl);
-        IoFreeMdl(ctx->Mdl);
-    }
-    delete [] reinterpret_cast<BYTE*>(ctx);
-
     return STATUS_SUCCESS;
 }
 
@@ -3568,7 +3536,27 @@ QxlDevice::ExecutePresentDisplayOnly(DoPresentMemory * ctx)
     PAGED_CODE();
     DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
 
-    // Push ctx into PresentRing and notify worker thread
+    UINT drawablesListSize = (ctx->NumMoves + ctx->NumDirtyRects + 1) * sizeof(QXLDrawable*);
+    QXLDrawable** drawables = reinterpret_cast<QXLDrawable**>(new (NonPagedPoolNx)BYTE[drawablesListSize]);
+    UINT d = 0;
+
+    // Copy all the scroll rects from source image to video frame buffer.
+    for (UINT i = 0; i < ctx->NumMoves; i++)
+    {
+        drawables[d] = DrawableFromRect(ctx, &ctx->Moves[i].DestRect);
+        if (drawables[d]) ++d;
+    }
+
+    // Copy all the dirty rects from source image to video frame buffer.
+    for (UINT i = 0; i < ctx->NumDirtyRects; i++)
+    {
+        drawables[d] = DrawableFromRect(ctx, &ctx->DirtyRect[i]);
+        if (drawables[d]) ++d;
+    }
+
+    drawables[d] = NULL;
+
+    // Push drawables into PresentRing and notify worker thread
     BOOLEAN locked = FALSE;
     int notify, wait;
     locked = WaitForObject(&m_PresentLock, NULL); // TODO: Probably not needed
@@ -3577,38 +3565,14 @@ QxlDevice::ExecutePresentDisplayOnly(DoPresentMemory * ctx)
         WaitForObject(&m_PresentThreadReadyEvent, NULL);
         SPICE_RING_PROD_WAIT(m_PresentRing, wait);
     }
-    *SPICE_RING_PROD_ITEM(m_PresentRing) = ctx;
+    *SPICE_RING_PROD_ITEM(m_PresentRing) = drawables;
     SPICE_RING_PUSH(m_PresentRing, notify);
     if (notify) {
         KeSetEvent(&m_PresentEvent, 0, FALSE);
     }
     ReleaseMutex(&m_PresentLock, locked);
 
-    return STATUS_PENDING;
-}
-
-KSYNCHRONIZE_ROUTINE SynchronizeVidSchNotifyInterrupt;
-
-typedef struct _SYNC_NOTIFY_INTERRUPT {
-    CONST DXGKRNL_INTERFACE*        DxgkInterface;
-    DXGKARGCB_NOTIFY_INTERRUPT_DATA NotifyInterrupt;
-} SYNC_NOTIFY_INTERRUPT;
-
-BOOLEAN SynchronizeVidSchNotifyInterrupt(_In_opt_ PVOID params)
-{
-    // This routine is non-paged code called at the device interrupt level (DIRQL)
-    // to notify VidSch and schedule a DPC.
-    SYNC_NOTIFY_INTERRUPT* pParam = reinterpret_cast<SYNC_NOTIFY_INTERRUPT*>(params);
-
-    // Callback OS to report about the interrupt
-    pParam->DxgkInterface->DxgkCbNotifyInterrupt(pParam->DxgkInterface->DeviceHandle, &pParam->NotifyInterrupt);
-
-    // Now queue a DPC for this interrupt (to callback schedule at DCP level and let it do more work there)
-    // DxgkCbQueueDpc can return FALSE if there is already a DPC queued
-    // this is an acceptable condition
-    pParam->DxgkInterface->DxgkCbQueueDpc(pParam->DxgkInterface->DeviceHandle);
-
-    return TRUE;
+    return STATUS_SUCCESS;
 }
 
 void QxlDevice::PresentThreadRoutine()
@@ -3616,117 +3580,29 @@ void QxlDevice::PresentThreadRoutine()
     PAGED_CODE();
     int wait;
     int notify;
-    DoPresentMemory *ctx;
+    QXLDrawable** drawables;
 
     DbgPrint(TRACE_LEVEL_VERBOSE, ("--->%s\n", __FUNCTION__));
 
     while (1)
     {
-        // Pop a present context from the ring
+        // Pop a drawables list from the ring
         // No need for a mutex, only one consumer thread
         SPICE_RING_CONS_WAIT(m_PresentRing, wait);
         while (wait) {
             WaitForObject(&m_PresentEvent, NULL);
             SPICE_RING_CONS_WAIT(m_PresentRing, wait);
         }
-        ctx = *SPICE_RING_CONS_ITEM(m_PresentRing);
+        drawables = *SPICE_RING_CONS_ITEM(m_PresentRing);
         SPICE_RING_POP(m_PresentRing, notify);
         if (notify) {
             KeSetEvent(&m_PresentThreadReadyEvent, 0, FALSE);
         }
 
-        // Set up destination blt info
-        BLT_INFO DstBltInfo;
-        DstBltInfo.pBits = ctx->DstAddr;
-        DstBltInfo.Pitch = ctx->DstStride;
-        DstBltInfo.BitsPerPel = ctx->DstBitPerPixel;
-        DstBltInfo.Offset.x = 0;
-        DstBltInfo.Offset.y = 0;
-        DstBltInfo.Rotation = ctx->Rotation;
-        DstBltInfo.Width = ctx->SrcWidth;
-        DstBltInfo.Height = ctx->SrcHeight;
-
-        // Set up source blt info
-        BLT_INFO SrcBltInfo;
-        SrcBltInfo.pBits = ctx->SrcAddr;
-        SrcBltInfo.Pitch = ctx->SrcPitch;
-        SrcBltInfo.BitsPerPel = 32;
-        SrcBltInfo.Offset.x = 0;
-        SrcBltInfo.Offset.y = 0;
-        SrcBltInfo.Rotation = D3DKMDT_VPPR_IDENTITY;
-        if (ctx->Rotation == D3DKMDT_VPPR_ROTATE90 ||
-            ctx->Rotation == D3DKMDT_VPPR_ROTATE270)
-        {
-            SrcBltInfo.Width = DstBltInfo.Height;
-            SrcBltInfo.Height = DstBltInfo.Width;
-        }
-        else
-        {
-            SrcBltInfo.Width = DstBltInfo.Width;
-            SrcBltInfo.Height = DstBltInfo.Height;
-        }
-
-
-        // Copy all the scroll rects from source image to video frame buffer.
-        for (UINT i = 0; i < ctx->NumMoves; i++)
-        {
-            POINT*   pSourcePoint = &ctx->Moves[i].SourcePoint;
-            RECT*    pDestRect = &ctx->Moves[i].DestRect;
-
-            DbgPrint(TRACE_LEVEL_INFORMATION, ("--- %d SourcePoint.x = %ld, SourcePoint.y = %ld, DestRect.bottom = %ld, DestRect.left = %ld, DestRect.right = %ld, DestRect.top = %ld\n",
-                i, pSourcePoint->x, pSourcePoint->y, pDestRect->bottom, pDestRect->left, pDestRect->right, pDestRect->top));
-
-            BltBits(&DstBltInfo,
-                &SrcBltInfo,
-                1,
-                pDestRect);
-        }
-
-        // Copy all the dirty rects from source image to video frame buffer.
-        for (UINT i = 0; i < ctx->NumDirtyRects; i++)
-        {
-            RECT*    pDirtyRect = &ctx->DirtyRect[i];
-            DbgPrint(TRACE_LEVEL_INFORMATION, ("--- %d pDirtyRect->bottom = %ld, pDirtyRect->left = %ld, pDirtyRect->right = %ld, pDirtyRect->top = %ld\n",
-                i, pDirtyRect->bottom, pDirtyRect->left, pDirtyRect->right, pDirtyRect->top));
-
-            BltBits(&DstBltInfo,
-                &SrcBltInfo,
-                1,
-                pDirtyRect);
-        }
-
-        FinishPresentDisplayOnly(ctx);
+        for (UINT i = 0; drawables[i]; ++i)
+            PushDrawable(drawables[i]);
+        delete[] reinterpret_cast<BYTE*>(drawables);
     }
-}
-
-void QxlDevice::FinishPresentDisplayOnly(DoPresentMemory *ctx)
-{
-    // Unmap and unlock the pages.
-    if (ctx->Mdl)
-    {
-        MmUnlockPages(ctx->Mdl);
-        IoFreeMdl(ctx->Mdl);
-    }
-
-    // Signal the PresentDisplayOnly routine has finished
-    SYNC_NOTIFY_INTERRUPT SyncNotifyInterrupt = {};
-    SyncNotifyInterrupt.DxgkInterface = m_pQxlDod->GetDxgkInterface();
-    SyncNotifyInterrupt.NotifyInterrupt.InterruptType = DXGK_INTERRUPT_DISPLAYONLY_PRESENT_PROGRESS;
-    SyncNotifyInterrupt.NotifyInterrupt.DisplayOnlyPresentProgress.VidPnSourceId = 0;// VidPnSourceId;
-
-    SyncNotifyInterrupt.NotifyInterrupt.DisplayOnlyPresentProgress.ProgressId =
-        DXGK_PRESENT_DISPLAYONLY_PROGRESS_ID_COMPLETE;
-
-    // Execute the SynchronizeVidSchNotifyInterrupt function at the interrupt
-    // IRQL in order to fake a real present progress interrupt
-    BOOLEAN bRet = FALSE;
-    NT_VERIFY(NT_SUCCESS(m_pQxlDod->GetDxgkInterface()->DxgkCbSynchronizeExecution(
-        m_pQxlDod->GetDxgkInterface()->DeviceHandle,
-        (PKSYNCHRONIZE_ROUTINE)SynchronizeVidSchNotifyInterrupt,
-        (PVOID)&SyncNotifyInterrupt, 0, &bRet)));
-    NT_ASSERT(bRet);
-
-    delete[] reinterpret_cast<BYTE*>(ctx);
 }
 
 void QxlDevice::WaitForReleaseRing(void)
@@ -4139,11 +4015,7 @@ VOID QxlDevice::SetImageId(InternalImage *internal,
     }
 }
 
-VOID QxlDevice::BltBits (
-    BLT_INFO* pDst,
-    CONST BLT_INFO* pSrc,
-    UINT  NumRects,
-    _In_reads_(NumRects) CONST RECT *pRects)
+QXLDrawable* QxlDevice::DrawableFromRect(DoPresentMemory *ctx, CONST RECT* pRect)
 {
     PAGED_CODE();
     QXLDrawable *drawable;
@@ -4156,15 +4028,12 @@ VOID QxlDevice::BltBits (
     LONG height;
 
     DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s device %d\n", __FUNCTION__,m_Id));
-    UNREFERENCED_PARAMETER(NumRects);
-    UNREFERENCED_PARAMETER(pDst);
 
-    if (!(drawable = Drawable(QXL_DRAW_COPY, pRects, NULL, 0))) {
+    if (!(drawable = Drawable(QXL_DRAW_COPY, pRect, NULL, 0))) {
         DbgPrint(TRACE_LEVEL_ERROR, ("Cannot get Drawable.\n"));
-        return;
+        return NULL;
     }
 
-    CONST RECT* pRect = &pRects[0];
     drawable->u.copy.scale_mode = SPICE_IMAGE_SCALE_MODE_NEAREST;
     drawable->u.copy.mask.bitmap = 0;
     drawable->u.copy.rop_descriptor = SPICE_ROPD_OP_PUT;
@@ -4207,15 +4076,15 @@ VOID QxlDevice::BltBits (
     internal->image.bitmap.format = SPICE_BITMAP_FMT_RGBA;
     internal->image.bitmap.stride = line_size;
 
-    UINT8* src = (UINT8*)pSrc->pBits+
-                                (pRect->top) * pSrc->Pitch +
+    UINT8* src = (UINT8*)ctx->SrcAddr +
+                                (pRect->top) * ctx->SrcPitch +
                                 (pRect->left * 4);
-    UINT8* src_end = src + pSrc->Pitch * height;
+    UINT8* src_end = src + ctx->SrcPitch * height;
     UINT8* dest = chunk->data;
     UINT8* dest_end = (UINT8 *)image_res + alloc_size;
     alloc_size = height * line_size;
 
-    for (; src != src_end; src += pSrc->Pitch, alloc_size -= line_size) {
+    for (; src != src_end; src += ctx->SrcPitch, alloc_size -= line_size) {
         PutBytesAlign(&chunk, &dest, &dest_end, src,
                       line_size, alloc_size, line_size);
     }
@@ -4233,9 +4102,8 @@ VOID QxlDevice::BltBits (
          drawable->surfaces_rects[0].top, drawable->surfaces_rects[0].bottom,
          drawable->u.copy.src_bitmap));
 
-    PushDrawable(drawable);
-
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
+    return drawable;
 }
 
 VOID QxlDevice::PutBytesAlign(QXLDataChunk **chunk_ptr, UINT8 **now_ptr,
