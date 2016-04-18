@@ -522,6 +522,7 @@ private:
     NTSTATUS SetCustomDisplay(QXLEscapeSetCustomDisplay* custom_display);
     void SetMonitorConfig(QXLHead* monitor_config);
     NTSTATUS StartPresentThread();
+    void StopPresentThread();
     void PresentThreadRoutine();
     static void PresentThreadRoutineWrapper(HANDLE dev) {
         ((QxlDevice *)dev)->PresentThreadRoutine();
@@ -581,6 +582,7 @@ private:
 
     QXLPresentOnlyRing m_PresentRing[1];
     HANDLE m_PresentThread;
+    bool m_TerminateThread;
 };
 
 class QxlDod {

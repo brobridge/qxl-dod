@@ -3228,6 +3228,7 @@ NTSTATUS QxlDevice::StartPresentThread()
     OBJECT_ATTRIBUTES ObjectAttributes;
     InitializeObjectAttributes(&ObjectAttributes, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
     m_PresentThread = NULL;
+    m_TerminateThread = false;
     return PsCreateSystemThread(
         &m_PresentThread,
         THREAD_ALL_ACCESS,
@@ -3270,6 +3271,12 @@ void QxlDevice::QxlClose()
 {
     PAGED_CODE();
     DestroyMemSlots();
+}
+
+void QxlDevice::StopPresentThread()
+{
+    m_TerminateThread = true;
+    KeSetEvent(&m_PresentEvent, 0, FALSE);
 }
 
 void QxlDevice::UnmapMemory(void)
@@ -3591,6 +3598,8 @@ void QxlDevice::PresentThreadRoutine()
         SPICE_RING_CONS_WAIT(m_PresentRing, wait);
         while (wait) {
             WaitForObject(&m_PresentEvent, NULL);
+            if (m_TerminateThread)
+                PsTerminateSystemThread(STATUS_SUCCESS);
             SPICE_RING_CONS_WAIT(m_PresentRing, wait);
         }
         drawables = *SPICE_RING_CONS_ITEM(m_PresentRing);
